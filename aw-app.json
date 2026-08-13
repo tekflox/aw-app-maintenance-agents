@@ -51,7 +51,7 @@
           "name": "System Analyst",
           "description": "Audits the running workspace daily \u2014 silent degradation, architecture drift, resilience gaps, agent-run failures \u2014 and opens one Kanban card per finding. Reports; never repairs.",
           "system_prompt_file": "prompts/system-analyst.md",
-          "model_slug": "claude-runner-opus",
+          "model_slug": "claude-runner-sonnet",
           "agent_config_slug": "maintenance-agents-config",
           "skill_slugs": [
             "aw-system-analyst"
