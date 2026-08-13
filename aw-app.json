@@ -2,8 +2,8 @@
   "manifest_version": 1,
   "id": "maintenance-agents",
   "name": "Maintenance Agents",
-  "version": "0.2.0",
-  "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it — plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
+  "version": "0.2.1",
+  "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it \u2014 plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
   "tier": "inprocess",
   "requires_ui_refresh": false,
   "category": "Runnables",
@@ -27,7 +27,7 @@
       {
         "id": "aw-system-analyst",
         "path": "skills/aw-system-analyst/SKILL.md",
-        "description": "Daily maintenance audit of the aw-workspace install — silent degradation via `aw-workspace-cli doctor`, app health, architecture drift against the knowledge base, resilience gaps, and Agents Platform run failures. Three phases: revalidate open Kanban cards, scan and open a card per finding, publish the report."
+        "description": "Daily maintenance audit of the aw-workspace install \u2014 silent degradation via `aw-workspace-cli doctor`, app health, architecture drift against the knowledge base, resilience gaps, and Agents Platform run failures. Three phases: revalidate open Kanban cards, scan and open a card per finding, publish the report."
       }
     ],
     "agents": {
@@ -35,7 +35,7 @@
         {
           "slug": "maintenance-agents-config",
           "name": "Maintenance Agents",
-          "description": "Read the workspace, reach the gateway. Full workspace filesystem access (the analyst audits that tree) plus the shared network, and the aw-gateway MCP server — without which there is no Kanban to file findings into and no knowledge base to check them against.",
+          "description": "Read the workspace, reach the gateway. Full workspace filesystem access (the analyst audits that tree) plus the shared network, and the aw-gateway MCP server \u2014 without which there is no Kanban to file findings into and no knowledge base to check them against.",
           "mcp_servers": [
             "aw-gateway"
           ],
@@ -49,7 +49,7 @@
         {
           "slug": "system-analyst",
           "name": "System Analyst",
-          "description": "Audits the running workspace daily — silent degradation, architecture drift, resilience gaps, agent-run failures — and opens one Kanban card per finding. Reports; never repairs.",
+          "description": "Audits the running workspace daily \u2014 silent degradation, architecture drift, resilience gaps, agent-run failures \u2014 and opens one Kanban card per finding. Reports; never repairs.",
           "system_prompt_file": "prompts/system-analyst.md",
           "model_slug": "claude-runner-opus",
           "agent_config_slug": "maintenance-agents-config",
@@ -71,10 +71,10 @@
     },
     "tasks": [
       {
-        "name": "System Analyst — daily audit",
+        "name": "System Analyst \u2014 daily audit",
         "type": "agent_prompt",
         "agent_slug": "system-analyst",
-        "prompt": "/aw-system-analyst\n\nRun the full daily audit as defined in the aw-system-analyst skill: Phase 1 saneamento of the cards you opened previously, Phase 2 scan across all four audits opening a card per P1/P2 finding as you find it, Phase 3 report. Start by loading the skill and searching the knowledge base — do not audit from memory.",
+        "prompt": "/aw-system-analyst\n\nRun the full daily audit as defined in the aw-system-analyst skill: Phase 1 saneamento of the cards you opened previously, Phase 2 scan across all four audits opening a card per P1/P2 finding as you find it, Phase 3 report. Start by loading the skill and searching the knowledge base \u2014 do not audit from memory.",
         "reuse_session": false,
         "schedules": [
           {
@@ -85,7 +85,7 @@
         "enabled": false
       },
       {
-        "name": "Workspace doctor — degradation watch",
+        "name": "Workspace doctor \u2014 degradation watch",
         "type": "agentic_output",
         "command": "aw-workspace-cli doctor",
         "notify_exit_codes": [
@@ -109,19 +109,19 @@
         "id": "agents-platform-runners",
         "version": ">=0.37.0",
         "required": false,
-        "reason": "Provides the contributes.agents surface — it holds the Agents Platform base URL and identity token, which core does not. Non-required on purpose: an agent declaration that arrives before the provider is HELD and replayed the moment one appears, so this app installs cleanly either way and the skill is usable by hand in the meantime."
+        "reason": "Provides the contributes.agents surface \u2014 it holds the Agents Platform base URL and identity token, which core does not. Non-required on purpose: an agent declaration that arrives before the provider is HELD and replayed the moment one appears, so this app installs cleanly either way and the skill is usable by hand in the meantime."
       },
       {
         "id": "tasks",
         "version": ">=0.16.0",
         "required": false,
-        "reason": "Provides the contributes.tasks surface — it owns the task tables and the cron tick. Non-required for the same reason as above: the declaration is held and replayed. Note the floor: seeding an 'agent_prompt' task needs the agent_slug forwarding added to register_contributed_task on 2026-08-13; an older tasks app seeds the row with a NULL agent_slug and it never dispatches."
+        "reason": "Provides the contributes.tasks surface \u2014 it owns the task tables and the cron tick. Non-required for the same reason as above: the declaration is held and replayed. Note the floor: seeding an 'agent_prompt' task needs the agent_slug forwarding added to register_contributed_task on 2026-08-13; an older tasks app seeds the row with a NULL agent_slug and it never dispatches."
       },
       {
         "id": "notion",
         "version": ">=0.6.0",
         "required": false,
-        "reason": "Supplies the aw-kanban MCP server the analyst opens finding cards through. Non-required: without it the audit still runs and still reports, it just has nowhere to file cards — degraded, not broken."
+        "reason": "Supplies the aw-kanban MCP server the analyst opens finding cards through. Non-required: without it the audit still runs and still reports, it just has nowhere to file cards \u2014 degraded, not broken."
       },
       {
         "id": "kb",
