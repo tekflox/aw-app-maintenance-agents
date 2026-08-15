@@ -91,6 +91,7 @@
         "notify_exit_codes": [
           1
         ],
+        "agent_slug": "system-analyst",
         "prompt": "`aw-workspace-cli doctor` just exited non-zero, which means a workspace component is degraded while very likely still reporting healthy everywhere else. Read the output above, identify which component is broken and what it takes with it, and say plainly whether this needs action now or can wait for the daily audit. Do not fix anything.",
         "schedules": [
           {
