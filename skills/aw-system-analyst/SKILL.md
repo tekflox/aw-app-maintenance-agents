@@ -91,8 +91,16 @@ card that exits 0 when the issue is gone.
 ## Phase 2 — Scan and open cards
 
 Run all four audits. **Open each card the moment you identify the finding**,
-not in a batch at the end — the card creation is what notifies Frederico,
-and a run that dies halfway should still have delivered what it found.
+not in a batch at the end — a run that dies halfway should still have
+delivered what it found via Phase 3's notification (see below), and opening
+late loses ground if the run dies before reaching Phase 3.
+
+> **`create_kanban_task` does NOT notify anyone by itself** — the aw-kanban
+> app dropped the Telegram-approval side of that tool (see the `aw-kanban`
+> skill: "Here it creates the card and stops; the response says
+> `approval_sent: false`"). The only notification this whole audit produces
+> is the one Phase 3 sends explicitly. Don't assume a card firing off a
+> message — it never does.
 
 ### Audit 1 — Silent degradation (run this first)
 
@@ -228,12 +236,20 @@ Portuguese unless he switched.
 
 ## Phase 3 — Report
 
-A cron-triggered run **only notifies on failure** (aw-app-tasks skips the
-notification when a scheduled run succeeds), so a clean audit is silent by
-design. The cards you opened in Phase 2 each fired their own Telegram
-message; this phase is the summary that ties them together.
+> **Corrected 2026-08-16** — this section used to say "a cron-triggered run
+> only notifies on failure, so a clean audit is silent by design" and "the
+> cards you opened in Phase 2 each fired their own Telegram message". Neither
+> was true: `aw-app-tasks` never sets `notified` for an `agent_prompt` task
+> (success or failure — verified against every historical run of this task),
+> and `create_kanban_task` stopped sending Telegram approvals when aw-kanban
+> was decoupled (see the note in Phase 2). The result: a run that found real
+> P1s and finished `success` produced **zero** Telegram messages, confirmed
+> live via Playwright against Frederico's own Telegram — see Kanban card
+> `degraded:system-analyst-no-telegram-delivery` for the full writeup. The
+> step below is the actual fix — **do not skip it**, it is currently the
+> *only* thing that tells Frederico this audit ran at all.
 
-Publish it as a presentation — see the **`aw-presentation`** skill:
+First, publish the presentation — see the **`aw-presentation`** skill:
 
 ```
 create_presentation({ "title": "system-analyst — <YYYY-MM-DD>", ... })
@@ -260,6 +276,34 @@ decision, something you couldn't verify). Be explicit about what you
 **didn't** check and why — a report that hides its own gaps is worse than a
 short one.
 
+**Then send the report to Frederico's Telegram — mandatory, every run,**
+regardless of whether Phase 2 found anything. Silence here is the bug this
+correction exists to fix. Use `Bash` (you always have it) to POST directly
+to the Agents Platform's own report endpoint — it needs no auth token, it is
+the same call `aw-backend`'s `kanban_manager.send_report()` makes, and it is
+reachable from inside your own agent container on the same docker bridge
+network aw-app-tasks already documents (`172.18.0.1` = the
+`agentic-workspace_default` bridge gateway):
+
+```bash
+curl -s -m 15 -X POST http://172.18.0.1:10014/api/telegram/report \
+  -H 'Content-Type: application/json' \
+  -d "$(python3 -c '
+import json, sys
+print(json.dumps({"title": sys.argv[1], "text": sys.argv[2]}))
+' "system-analyst — $(date +%Y-%m-%d)" "$YOUR_SUMMARY_TEXT")"
+```
+
+`$YOUR_SUMMARY_TEXT` is a short version of the Resumo section above (plain
+text, a few lines — this is a Telegram message, not the full presentation).
+The call returns `{"ok": true, "sent": N}` on success; `N` is how many
+sysadmin recipients got it. If the call fails or times out, **say so
+explicitly in this run's own final output** (don't retry in a loop — one
+attempt, then move on) so it shows up in `get_run_detail` for whoever checks
+later. If `172.18.0.1` isn't reachable from your container, note that too —
+it's the same address aw-app-tasks's `agents_platform_base` config uses, so
+if it changed there it changed here.
+
 Finally: if the audit surfaced a durable lesson about how this workspace
 fails, write it to the KB (`update_knowledge_base`). That is what stops the
 next run from rediscovering it.
@@ -274,8 +318,9 @@ reference — never hand-roll curl against the gateway.
 
 | Tool | Purpose |
 |---|---|
-| `create_kanban_task` | Open/update a finding card + notify |
+| `create_kanban_task` | Open/update a finding card. **Does not notify** — see Phase 2. |
 | `list_kanban_cards`, `move_kanban_task`, `add_kanban_comment` | Phase 1 saneamento |
 | `search_knowledge_base`, `update_knowledge_base` | Step 0 grounding, Phase 3 lessons |
 | `list_agents`, `list_runs` | Step 0 routing, Audit 4 |
-| `create_presentation` | Phase 3 report |
+| `create_presentation` | Phase 3 written report |
+| `Bash` → `curl .../api/telegram/report` | Phase 3 **actual Telegram notification** — mandatory, see Phase 3 |
