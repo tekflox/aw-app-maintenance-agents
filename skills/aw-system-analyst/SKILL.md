@@ -72,8 +72,15 @@ apply. This runs first so the scan doesn't re-report something already
 tracked.
 
 ```
-list_kanban_cards({"source": "system-analyst"})
+list_kanban_cards({"source": "system-analyst", "status": "backlog"})
 ```
+
+**Only `Backlog` (plus `Ready` / `Need Human` if you want them).** Do NOT walk
+every status. `Planned`, `Idea` and `Not Needed` hold roadmap and product items
+that were never audit findings — they have no CheckHint, they will never
+self-close, and walking them is what made the 2026-08-19 run report "53 of 70
+cards unverifiable". A roadmap card in the saneamento queue is a bug in the
+queue, not a finding.
 
 For each open card, run its **CheckHint** — the bash one-liner stored on the
 card that exits 0 when the issue is gone.
@@ -85,6 +92,18 @@ card that exits 0 when the issue is gone.
   against in Phase 2 by its `finding_key`.
 * **no CheckHint, or the hint errors** → leave the card open and note it in
   the report. Never close a card you couldn't verify.
+
+**If a card you own has no CheckHint, write one now** — don't just log it as
+unverifiable for the next run to log again. An audit card without a runnable
+hint is dead weight on this board forever; authoring the hint is part of
+saneamento, not a separate task.
+
+**Never execute a CheckHint containing a credential.** If a hint has an inline
+token, key or password: do not run it, rewrite the hint to read the secret from
+`<AW_WORKSPACE_HOME>/secrets/` at run time, and open a P1 card for rotation —
+redacting the card does *not* rotate the secret, and the old value stays in
+Notion's page history. This happened for real on 2026-08-05 (a live Notion
+integration token sat in plaintext on a card for two weeks).
 
 ---
 
@@ -220,14 +239,37 @@ create_kanban_task({
 | `description` | ✅ | ≤200 chars. This is what reaches Telegram — make it the sentence that decides whether to act |
 | `plan` | — | The card body: what was found (with file:line or command output), how it was detected, impact, numbered fix plan, verification |
 | `input_text` | — | What the executor agent is told to do when approved |
-| `check_hint` | — | Bash one-liner, exit 0 when fixed. Phase 1 of the *next* run executes this — see the constraint below |
+| `check_hint` | ✅ | Bash one-liner, exit 0 when fixed. Phase 1 of the *next* run executes this — see the constraints below. **Treat as required**: a card without one can never self-close |
 | `source` | — | Always `system-analyst` |
 | `tags` | — | Free-form |
 
-**`check_hint` constraint:** it runs inside an agent container. `grep`,
-`test`, `curl`, `python3` and `aw-workspace-cli` are available; **`docker
-ps` is not.** Write hints against files and HTTP endpoints, not the
-container runtime.
+**`check_hint` constraints** — it runs inside an *agent* container a day
+later, not in your shell now. Every one of these was a real dead hint on this
+board, found on 2026-08-19:
+
+* **Available:** `grep`, `test`, `curl`, `python3` (with `cryptography`) and
+  `aw-workspace-cli`. **Not available:** `docker ps`, `podman exec`. Write
+  hints against files and HTTP endpoints, not the container runtime.
+* **Paths.** This workspace is `/opt/aw-workspace`. The retired monolith is a
+  *checkout* at `/opt/aw-workspace/repos/agentic-workspace` — bare
+  `/opt/agentic-workspace` does not exist and never will. 22 cards pointed
+  there and could not validate for months.
+* **Reachable hosts.** From an agent container: the workspace API is
+  `http://172.18.0.1:9123` and Agents Platform is `http://172.18.0.1:10014`
+  (**not** `127.0.0.1`, which is the agent container itself, and not port
+  `10005`, which is retired). AP's `/api/*` needs a bearer token — read it
+  from `.aw-workspace/app-config/agents-platform-runners.json`.
+* **No secrets inline.** Read them from `.aw-workspace/secrets/*.json`
+  (Fernet, key at `.aw-workspace/secret.key`) or `app-config/*.json` at run
+  time. A hint is stored in Notion in plaintext, forever, in page history.
+* **Fail closed.** When the hint cannot tell, it must exit non-zero. A hint
+  that greps a whole file for a symbol that exists somewhere else in it, or
+  that reports green merely because a path is *absent*, is a false-green —
+  this board's single most common defect. Scope the grep to the function or
+  line range the finding is actually about.
+* **Run it before you save it.** Exit code 2 (bad quoting) and a hint
+  truncated by Notion's 2000-char rich_text limit both read as "still broken"
+  forever. If it doesn't fit on one line, it's too clever — narrow the check.
 
 Write `description` and `plan` in the language Frederico uses with you —
 Portuguese unless he switched.
