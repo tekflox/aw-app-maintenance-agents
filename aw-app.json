@@ -3,7 +3,7 @@
   "id": "maintenance-agents",
   "name": "Maintenance Agents",
   "version": "0.6.0",
-  "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it \u2014 plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
+  "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it — plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
   "tier": "inprocess",
   "requires_ui_refresh": false,
   "category": "Runnables",
@@ -27,7 +27,12 @@
       {
         "id": "aw-system-analyst",
         "path": "skills/aw-system-analyst/SKILL.md",
-        "description": "Daily maintenance audit of the aw-workspace install \u2014 silent degradation via `aw-workspace-cli doctor`, app health, architecture drift against the knowledge base, resilience gaps, and Agents Platform run failures. Three phases: revalidate open Kanban cards, scan and open a card per finding, publish the report."
+        "description": "Daily maintenance audit of the aw-workspace install — silent degradation via `aw-workspace-cli doctor`, app health, architecture drift against the knowledge base, resilience gaps, and Agents Platform run failures. Three phases: revalidate open Kanban cards, scan and open a card per finding, publish the report."
+      },
+      {
+        "id": "aw-autoskill",
+        "path": "skills/aw-autoskill/SKILL.md",
+        "description": "Analyzes recent Claude Code sessions in this workspace to discover skill-creation opportunities and automatically create or update aw-autoskill-<name> skills. Ships compile_sessions.py alongside it — the skill is useless without that script."
       }
     ],
     "agents": {
@@ -35,7 +40,7 @@
         {
           "slug": "maintenance-agents-config",
           "name": "Maintenance Agents",
-          "description": "Read the workspace, reach the gateway. Full workspace filesystem access (the analyst audits that tree) plus the shared network, and the aw-gateway MCP server \u2014 without which there is no Kanban to file findings into and no knowledge base to check them against.",
+          "description": "Read the workspace, reach the gateway. Full workspace filesystem access (the analyst audits that tree) plus the shared network, and the aw-gateway MCP server — without which there is no Kanban to file findings into and no knowledge base to check them against.",
           "mcp_servers": [
             "aw-gateway"
           ],
@@ -49,7 +54,7 @@
         {
           "slug": "system-analyst",
           "name": "System Analyst",
-          "description": "Audits the running workspace daily \u2014 silent degradation, architecture drift, resilience gaps, agent-run failures \u2014 and opens one Kanban card per finding. Reports; never repairs.",
+          "description": "Audits the running workspace daily — silent degradation, architecture drift, resilience gaps, agent-run failures — and opens one Kanban card per finding. Reports; never repairs.",
           "system_prompt_file": "prompts/system-analyst.md",
           "model_slug": "claude-runner-sonnet",
           "agent_config_slug": "maintenance-agents-config",
@@ -66,15 +71,56 @@
           "hidden_from_flow": false,
           "icon": "activity",
           "color": "#f0c000"
+        },
+        {
+          "slug": "aw-autoskill",
+          "name": "AW AutoSkill Discovery",
+          "description": "Scans recent Claude Code sessions in this workspace daily for recurring patterns, friction and missing-tool knowledge, and turns what it finds into aw-autoskill-<name> skills. Writes to native-skills/ and pushes; never edits the generated skills/ mirror.",
+          "system_prompt_file": "prompts/aw-autoskill.md",
+          "model_slug": "claude-runner-sonnet",
+          "agent_config_slug": "maintenance-agents-config",
+          "skill_slugs": [
+            "aw-autoskill"
+          ],
+          "capabilities": "Reads this workspace's own session transcripts, finds work that keeps being re-derived, and writes it down as a skill so the next agent starts from it instead. Produces skills; changes nothing else.",
+          "use_cases": [
+            "run the daily autoskill scan",
+            "what keeps getting re-explained in this workspace",
+            "turn this recurring workflow into a skill"
+          ],
+          "hidden_from_flow": false,
+          "icon": "sparkles",
+          "color": "#a855f7"
+        },
+        {
+          "slug": "kb-curator",
+          "name": "KB Curator",
+          "description": "Curates this workspace's knowledge base, agent memory and skill health daily — stale and duplicate docs, memory that contradicts itself, skills nobody loads. Updates and creates directly; deletes and merges go through approval.",
+          "system_prompt_file": "prompts/kb-curator.md",
+          "model_slug": "claude-runner-sonnet",
+          "agent_config_slug": "maintenance-agents-config",
+          "skill_slugs": [
+            "aw-kb-curator"
+          ],
+          "capabilities": "Audits the knowledge base, the agent memory dir and skill usage for staleness, duplication, contradiction and gaps, and reports one unified verdict. Non-destructive without approval.",
+          "use_cases": [
+            "run the daily KB curation",
+            "revisa o KB",
+            "which KB docs are stale or contradict each other",
+            "which skills is nobody loading"
+          ],
+          "hidden_from_flow": false,
+          "icon": "book-open",
+          "color": "#0ea5a4"
         }
       ]
     },
     "tasks": [
       {
-        "name": "System Analyst \u2014 daily audit",
+        "name": "System Analyst — daily audit",
         "type": "agent_prompt",
         "agent_slug": "system-analyst",
-        "prompt": "/aw-system-analyst\n\nRun the full daily audit as defined in the aw-system-analyst skill: Phase 1 saneamento of the cards you opened previously, Phase 2 scan across all four audits opening a card per P1/P2 finding as you find it, Phase 3 report. Start by loading the skill and searching the knowledge base \u2014 do not audit from memory.",
+        "prompt": "/aw-system-analyst\n\nRun the full daily audit as defined in the aw-system-analyst skill: Phase 1 saneamento of the cards you opened previously, Phase 2 scan across all four audits opening a card per P1/P2 finding as you find it, Phase 3 report. Start by loading the skill and searching the knowledge base — do not audit from memory.",
         "reuse_session": false,
         "schedules": [
           {
@@ -85,7 +131,7 @@
         "enabled": false
       },
       {
-        "name": "Workspace doctor \u2014 degradation watch",
+        "name": "Workspace doctor — degradation watch",
         "type": "agentic_output",
         "command": "aw-workspace-cli doctor",
         "notify_exit_codes": [
@@ -100,6 +146,34 @@
           }
         ],
         "enabled": false
+      },
+      {
+        "name": "aw-autoskill daily",
+        "type": "agent_prompt",
+        "agent_slug": "aw-autoskill",
+        "prompt": "Run the aw-autoskill skill: compile the session differential since the last run, analyze it for skill-creation opportunities (recurring tool sequences, re-explained context, friction, missing-tool knowledge, new workflows), and create or update any warranted native-skills/aw-autoskill-<name> skills — committing and pushing them, then running `aw-workspace-cli agent sync`. Zero new sessions since last_run is a clean result, not a failure: report it and stop. Send the Telegram report either way.",
+        "reuse_session": false,
+        "schedules": [
+          {
+            "kind": "daily",
+            "time": "03:00"
+          }
+        ],
+        "enabled": false
+      },
+      {
+        "name": "kb-curator daily",
+        "type": "agent_prompt",
+        "agent_slug": "kb-curator",
+        "prompt": "/aw-kb-curator\n\nRun the full daily KB curation audit as defined in the aw-kb-curator skill: Part 1 KB audit, Part 2 memory audit, Part 3 skill health, Part 4 KB reachability. Start by loading the skill and searching the knowledge base if available. Produce the unified report at the end.",
+        "reuse_session": false,
+        "schedules": [
+          {
+            "kind": "daily",
+            "time": "05:00"
+          }
+        ],
+        "enabled": false
       }
     ]
   },
@@ -110,19 +184,19 @@
         "id": "agents-platform-runners",
         "version": ">=0.37.0",
         "required": false,
-        "reason": "Provides the contributes.agents surface \u2014 it holds the Agents Platform base URL and identity token, which core does not. Non-required on purpose: an agent declaration that arrives before the provider is HELD and replayed the moment one appears, so this app installs cleanly either way and the skill is usable by hand in the meantime."
+        "reason": "Provides the contributes.agents surface — it holds the Agents Platform base URL and identity token, which core does not. Non-required on purpose: an agent declaration that arrives before the provider is HELD and replayed the moment one appears, so this app installs cleanly either way and the skill is usable by hand in the meantime."
       },
       {
         "id": "tasks",
         "version": ">=0.16.0",
         "required": false,
-        "reason": "Provides the contributes.tasks surface \u2014 it owns the task tables and the cron tick. Non-required for the same reason as above: the declaration is held and replayed. Note the floor: seeding an 'agent_prompt' task needs the agent_slug forwarding added to register_contributed_task on 2026-08-13; an older tasks app seeds the row with a NULL agent_slug and it never dispatches."
+        "reason": "Provides the contributes.tasks surface — it owns the task tables and the cron tick. Non-required for the same reason as above: the declaration is held and replayed. Note the floor: seeding an 'agent_prompt' task needs the agent_slug forwarding added to register_contributed_task on 2026-08-13; an older tasks app seeds the row with a NULL agent_slug and it never dispatches."
       },
       {
         "id": "notion",
         "version": ">=0.6.0",
         "required": false,
-        "reason": "Supplies the aw-kanban MCP server the analyst opens finding cards through. Non-required: without it the audit still runs and still reports, it just has nowhere to file cards \u2014 degraded, not broken."
+        "reason": "Supplies the aw-kanban MCP server the analyst opens finding cards through. Non-required: without it the audit still runs and still reports, it just has nowhere to file cards — degraded, not broken."
       },
       {
         "id": "kb",

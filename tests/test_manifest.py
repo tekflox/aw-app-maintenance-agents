@@ -52,11 +52,41 @@ def test_every_agent_prompt_task_names_a_declared_agent(manifest):
             )
 
 
-def test_every_agent_skill_slug_is_shipped_by_this_app(manifest):
+def test_every_agent_skill_slug_is_shipped_here_or_by_a_declared_dependency(manifest):
+    """A skill_slug that resolves to nothing is the quiet failure: the agent
+    still runs, just with no contract — which reads as a bad model, not a
+    missing file.
+
+    `aw-kb-curator` is the one exception, and it is a deliberate one: the
+    `kb` app owns that contract because it owns the knowledge base the
+    curator audits. Duplicating it here would give two apps a copy that
+    drifts. The agent lives here instead because it runs on this app's
+    config and its own scheduled task, and `kb` is already a declared
+    dependency — non-required, so without it the agent seeds and simply has
+    no contract to load, same degraded-not-broken shape as the analyst
+    without Notion.
+    """
     shipped = {s["id"] for s in manifest["contributes"]["skills"]}
+    from_dependency = {"aw-kb-curator"}
+    depends_on = {d["id"] for d in manifest["dependencies"]["apps"]}
+    assert "kb" in depends_on
     for agent in manifest["contributes"]["agents"]["agents"]:
         for slug in agent.get("skill_slugs", []):
-            assert slug in shipped
+            assert slug in shipped or slug in from_dependency, (
+                f"{agent['slug']} references skill {slug!r}, which nothing ships"
+            )
+
+
+def test_the_autoskill_skill_ships_the_script_it_cannot_run_without(manifest):
+    """aw-autoskill's SKILL.md invokes compile_sessions.py by path, and the
+    skill materialiser copytree's the whole directory — so the script rides
+    along only because it sits next to SKILL.md. Ship one without the other
+    and the agent reads a contract whose first instruction is a file that
+    isn't there.
+    """
+    entry = next(s for s in manifest["contributes"]["skills"] if s["id"] == "aw-autoskill")
+    skill_dir = (APP_DIR / entry["path"]).parent
+    assert (skill_dir / "compile_sessions.py").is_file()
 
 
 def test_referenced_files_exist(manifest):
