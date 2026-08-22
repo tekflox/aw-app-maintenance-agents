@@ -42,8 +42,15 @@ Run the bundled script to get the session differential:
 
 ```bash
 cd /opt/aw-workspace
-python3 native-skills/aw-autoskill/compile_sessions.py
+python3 skills/aw-autoskill/compile_sessions.py
 ```
+
+That path is the materialized mirror, not `native-skills/` — this skill is
+contributed by `aw-app-maintenance-agents` (see the `.aw-app-id` marker beside
+it), so `agent sync` writes the script into `skills/aw-autoskill/` and there is
+no `native-skills/aw-autoskill/` to run it from. Note the asymmetry with Step 3:
+the *script you run* lives under `skills/`, but the *skills you write* still go
+under `native-skills/`.
 
 Options:
 - `--all` — ignore last_run, analyze ALL sessions (use on first run or to re-scan)
