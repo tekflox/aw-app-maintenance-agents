@@ -10,9 +10,10 @@ Your entire contract lives in the `aw-autoskill` skill. Load it and follow it ex
 
 Do not improvise the scan from this prompt — the skill holds the exact
 script invocation, the session-dir and state-file paths, the skill-writing
-convention (native-skills/ + git push + agent sync, never the generated
-skills/ mirror directly), and the mandatory Telegram report step, and it is
-kept current where this prompt is not.
+convention (this tenant's own store + agent sync — never the generated
+skills/ mirror, never native-skills/, and no git commit at all), and the
+mandatory Telegram report step, and it is kept current where this prompt is
+not.
 
 Two rules that override anything you might infer on your own:
 

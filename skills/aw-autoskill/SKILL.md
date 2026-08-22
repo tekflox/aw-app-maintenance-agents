@@ -7,7 +7,8 @@ description: Analyze recent Claude Code sessions in this workspace to discover s
 
 This skill scans recent Claude Code sessions run against this workspace,
 identifies recurring patterns that would benefit from a dedicated skill, and
-creates or updates `aw-autoskill-<name>` skills under `native-skills/`.
+creates or updates `aw-autoskill-<name>` skills in this tenant's own store,
+`.aw-workspace/data/aw-autoskill/skills/`.
 
 State is tracked in `.aw-workspace/data/aw-autoskill/aw-autoskill.json` so
 each run only analyzes the delta since the last run.
@@ -26,13 +27,19 @@ differences from that version, both load-bearing:
    agents-platform-runners MCP tools, not direct DB access — this agent's
    container has no DB credentials and likely can't reach the DB host anyway.
 
-2. **New skills land in `native-skills/`, not `skills/`.** `skills/` in this
-   workspace is a generated, gitignored mirror (materialized by
-   `aw-workspace-cli agent sync` from `native-skills/` + each installed
-   app's `contributes.skills`) — writing there directly is invisible to the
-   next session and gets silently overwritten on the next sync. Every new or
-   updated skill this agent produces must go under `native-skills/<name>/`,
-   be committed and pushed to the `aw-workspace` repo, and only then synced.
+2. **New skills land in this tenant's store, and are never committed.** Write
+   them to `.aw-workspace/data/aw-autoskill/skills/<name>/`. Do **not** write
+   to `skills/` (a generated mirror — overwritten on the next sync) and do
+   **not** write to `native-skills/` (this repo's *product* tree: it is public
+   and shared by every deployment, so a skill you generate there leaks one
+   tenant's accumulated knowledge into everyone else's install).
+
+   The store is picked up automatically: this app implements
+   `Plugin.list_skill_sources()` and `materialize()` re-scans the directory on
+   every sync, so a skill you write appears in `skills/` and all four agent
+   mirrors on the next `aw-workspace-cli agent sync` — with no commit, no
+   release and no app update. Deleting one from the store removes it
+   everywhere, same pass.
 
 ---
 
@@ -45,12 +52,10 @@ cd /opt/aw-workspace
 python3 skills/aw-autoskill/compile_sessions.py
 ```
 
-That path is the materialized mirror, not `native-skills/` — this skill is
-contributed by `aw-app-maintenance-agents` (see the `.aw-app-id` marker beside
-it), so `agent sync` writes the script into `skills/aw-autoskill/` and there is
-no `native-skills/aw-autoskill/` to run it from. Note the asymmetry with Step 3:
-the *script you run* lives under `skills/`, but the *skills you write* still go
-under `native-skills/`.
+That path is the materialized mirror — this skill is contributed by
+`aw-app-maintenance-agents` (see the `.aw-app-id` marker beside it), so
+`agent sync` writes the script into `skills/aw-autoskill/` and there is no
+`native-skills/aw-autoskill/` to run it from.
 
 Options:
 - `--all` — ignore last_run, analyze ALL sessions (use on first run or to re-scan)
@@ -85,7 +90,8 @@ Read the compiled JSON and look for:
 
 For each opportunity, decide:
 - Is it truly reusable (not one-off)?
-- Does a skill already exist for it? (`ls native-skills/` + check existing app-contributed skill descriptions via `search_skills`)
+- Does a skill already exist for it? (`ls skills/` — the merged view of every
+  source — plus `search_skills` for the descriptions)
 - Would it be `aw-autoskill-<name>` (auto-generated) or an update to an existing skill?
 
 ---
@@ -95,7 +101,7 @@ For each opportunity, decide:
 ### Creating a new skill
 
 ```
-native-skills/aw-autoskill-<name>/SKILL.md
+.aw-workspace/data/aw-autoskill/skills/aw-autoskill-<name>/SKILL.md
 ```
 
 Frontmatter:
@@ -113,32 +119,31 @@ Content: clear instructions for the agent — what to do, which tools to use, wh
 
 ### Updating an existing skill
 
-Only edit skills under `native-skills/` — if the skill you want to update is
-app-contributed (check for a `.aw-app-id` marker in its materialized
-`skills/<name>/` copy), it isn't yours to edit; note the gap in your report
-instead. Edit the SKILL.md to add the new knowledge. Add a `last_updated`
-field to the frontmatter and note what changed.
+Only edit skills in your own store. Everything else in `skills/` belongs to
+someone else — an entry with a `.aw-app-id` marker but no `.aw-skill-source`
+is an app's, shipped in its package and overwritten on its next update; one
+with neither is native to the `aw-workspace` repo. Neither is yours to edit:
+note the gap in your report instead.
 
-### Commit and push
+Edit the SKILL.md to add the new knowledge. Add a `last_updated` field to the
+frontmatter and note what changed.
 
-This repo (`aw-workspace`) is Frederico's own — push straight to `master`,
-no feature branch or PR needed:
+### Nothing to commit
 
-```bash
-cd /opt/aw-workspace
-git add native-skills/aw-autoskill-<name>/
-git commit -m "feat(skills): aw-autoskill-<name> — <one line>"
-git pull --rebase origin master   # in case another run/agent pushed meanwhile
-git push origin master
-```
+Skills in the store are **not** git content — deliberately. They are one
+tenant's accumulated knowledge, and `native-skills/` is a public product tree
+shared by every deployment. There is no `git add`, no push, no app release in
+this loop: write the file, run the sync in Step 5, and it is live. If you
+find yourself reaching for `git commit` here, you are writing to the wrong
+place.
 
-If plain `git push origin master` fails with an auth error (it has before —
-this session's `$HOME` doesn't have the git credential mirror mounted even
-though a token file exists at the repo root), retry once with:
-
-```bash
-git -c credential.helper="store --file=/opt/aw-workspace/.git-credentials" push origin master
-```
+**Expire what died.** Because there is no commit and no review, nothing else
+will clean up after you. Before adding a skill, ask whether it documents *how
+the system works* (keep) or *an incident that is being fixed* (don't write
+it, or write it knowing it is temporary). On each run, delete store entries
+whose underlying problem is resolved — a stale skill is worse than a missing
+one, because an agent will act on it. Deleting the directory is the whole
+operation; the next sync removes it from every mirror.
 
 ---
 
@@ -180,10 +185,15 @@ After creating/updating skills, run:
 aw-workspace-cli agent sync
 ```
 
-This propagates any new/updated `native-skills/` entries to
-`skills/`, `.claude/skills/`, `.cursor/skills/`, `.gemini/skills/` so they're
-available in the next session. (Not `./aw agent sync` — that binary is a
-deprecated stub in this repo, see `AGENTS.md`.)
+This re-scans your store and propagates anything you added, changed or
+deleted into `skills/`, `.claude/skills/`, `.cursor/skills/` and
+`.gemini/skills/`, so it is available in the next session. (Not `./aw agent
+sync` — that binary is a deprecated stub in this repo, see `AGENTS.md`.)
+
+Verify rather than assume: `ls skills/ | grep aw-autoskill-` should show what
+you just wrote. If it doesn't, the store path is wrong — check that you wrote
+under `.aw-workspace/data/aw-autoskill/skills/<name>/` and that the file is
+named `SKILL.md` (a directory without one is skipped, silently).
 
 ---
 

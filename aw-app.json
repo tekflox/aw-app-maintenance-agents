@@ -75,7 +75,7 @@
         {
           "slug": "aw-autoskill",
           "name": "AW AutoSkill Discovery",
-          "description": "Scans recent Claude Code sessions in this workspace daily for recurring patterns, friction and missing-tool knowledge, and turns what it finds into aw-autoskill-<name> skills. Writes to native-skills/ and pushes; never edits the generated skills/ mirror.",
+          "description": "Scans recent Claude Code sessions in this workspace daily for recurring patterns, friction and missing-tool knowledge, and turns what it finds into aw-autoskill-<name> skills. Writes to this tenant's own skill store, which agent sync picks up — nothing is committed, so one tenant's generated skills never reach another's install.",
           "system_prompt_file": "prompts/aw-autoskill.md",
           "model_slug": "claude-runner-sonnet",
           "agent_config_slug": "maintenance-agents-config",
@@ -151,7 +151,7 @@
         "name": "aw-autoskill daily",
         "type": "agent_prompt",
         "agent_slug": "aw-autoskill",
-        "prompt": "Run the aw-autoskill skill: compile the session differential since the last run, analyze it for skill-creation opportunities (recurring tool sequences, re-explained context, friction, missing-tool knowledge, new workflows), and create or update any warranted native-skills/aw-autoskill-<name> skills \u2014 committing and pushing them, then running `aw-workspace-cli agent sync`. Zero new sessions since last_run is a clean result, not a failure: report it and stop. Send the Telegram report either way.",
+        "prompt": "Run the aw-autoskill skill: compile the session differential since the last run, analyze it for skill-creation opportunities (recurring tool sequences, re-explained context, friction, missing-tool knowledge, new workflows), and create or update any warranted aw-autoskill-<name> skills in this tenant's store, then run `aw-workspace-cli agent sync`. Do not commit anything \u2014 the store is not git content. Also expire store entries whose underlying problem is already resolved. Zero new sessions since last_run is a clean result, not a failure: report it and stop. Send the Telegram report either way.",
         "reuse_session": false,
         "schedules": [
           {
