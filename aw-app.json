@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "maintenance-agents",
   "name": "Maintenance Agents",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it \u2014 plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
   "tier": "inprocess",
   "requires_ui_refresh": false,
@@ -75,7 +75,7 @@
         {
           "slug": "aw-autoskill",
           "name": "AW AutoSkill Discovery",
-          "description": "Scans recent Claude Code sessions in this workspace daily for recurring patterns, friction and missing-tool knowledge, and turns what it finds into aw-autoskill-<name> skills. Writes to this tenant's own skill store, which agent sync picks up — nothing is committed, so one tenant's generated skills never reach another's install.",
+          "description": "Scans recent Claude Code sessions in this workspace daily for recurring patterns, friction and missing-tool knowledge, and turns what it finds into aw-autoskill-<name> skills. Writes to this tenant's own skill store, which agent sync picks up \u2014 nothing is committed, so one tenant's generated skills never reach another's install.",
           "system_prompt_file": "prompts/aw-autoskill.md",
           "model_slug": "claude-runner-sonnet",
           "agent_config_slug": "maintenance-agents-config",
