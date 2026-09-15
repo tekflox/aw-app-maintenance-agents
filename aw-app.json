@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "maintenance-agents",
   "name": "Maintenance Agents",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it \u2014 plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
   "tier": "inprocess",
   "requires_ui_refresh": false,
@@ -57,6 +57,7 @@
           "description": "Audits the running workspace daily \u2014 silent degradation, architecture drift, resilience gaps, agent-run failures \u2014 and opens one Kanban card per finding. Reports; never repairs.",
           "system_prompt_file": "prompts/system-analyst.md",
           "model_slug": "claude-runner-sonnet",
+          "disable_harness_tools": true,
           "agent_config_slug": "maintenance-agents-config",
           "skill_slugs": [
             "aw-system-analyst"
@@ -78,6 +79,7 @@
           "description": "Scans recent Claude Code sessions in this workspace daily for recurring patterns, friction and missing-tool knowledge, and turns what it finds into aw-autoskill-<name> skills. Writes to this tenant's own skill store, which agent sync picks up \u2014 nothing is committed, so one tenant's generated skills never reach another's install.",
           "system_prompt_file": "prompts/aw-autoskill.md",
           "model_slug": "claude-runner-sonnet",
+          "disable_harness_tools": true,
           "agent_config_slug": "maintenance-agents-config",
           "skill_slugs": [
             "aw-autoskill"
@@ -98,6 +100,7 @@
           "description": "Curates this workspace's knowledge base, agent memory and skill health daily \u2014 stale and duplicate docs, memory that contradicts itself, skills nobody loads. Updates and creates directly; deletes and merges go through approval.",
           "system_prompt_file": "prompts/kb-curator.md",
           "model_slug": "claude-runner-sonnet",
+          "disable_harness_tools": true,
           "agent_config_slug": "maintenance-agents-config",
           "skill_slugs": [
             "aw-kb-curator"
