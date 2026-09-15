@@ -174,6 +174,17 @@
           }
         ],
         "enabled": false
+      },
+      {
+        "name": "Sync: Agents",
+        "type": "terminal",
+        "prompt": "aw-workspace-cli agent sync",
+        "schedules": [
+          {
+            "kind": "cron",
+            "expr": "*/30 * * * *"
+          }
+        ]
       }
     ]
   },
