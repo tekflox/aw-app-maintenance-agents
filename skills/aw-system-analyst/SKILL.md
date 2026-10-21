@@ -34,9 +34,10 @@ Mandatory, in this order. Skipping these is how you produce findings that
 were already documented, or cards assigned to an agent that doesn't exist.
 
 **Search the knowledge base.** At minimum: the subject area of each audit
-below. `search_knowledge_base` (or `aw__kb__search_knowledge_base` through
-the gateway). Two or three angles per audit. A finding the KB already
-explains is not a finding.
+below. `knowledge_search` (or `aw__aw_knowledgeable__knowledge_search`
+through the gateway, contributed by the Knowledgeable Connector app). Two
+or three angles per audit. A finding the KB already explains is not a
+finding.
 
 **List the agents you can assign work to:**
 
@@ -348,14 +349,15 @@ it's the same address aw-app-tasks's `agents_platform_base` config uses, so
 if it changed there it changed here.
 
 Finally: if the audit surfaced a durable lesson about how this workspace
-fails, write it to the KB (`update_knowledge_base`). That is what stops the
-next run from rediscovering it.
+fails, write it to the KB as a short Markdown document via
+`upload_document` (base64-encoded content, `.md` filename). That is what
+stops the next run from rediscovering it.
 
 ---
 
 ## MCP tools
 
-Through `aw-gateway`, tool names are prefixed (`aw__kb__…`,
+Through `aw-gateway`, tool names are prefixed (`aw__aw_knowledgeable__…`,
 `aw__aw_kanban__…`). See the **`aw-kanban`** skill for the full Kanban
 reference — never hand-roll curl against the gateway.
 
@@ -363,7 +365,7 @@ reference — never hand-roll curl against the gateway.
 |---|---|
 | `create_kanban_task` | Open/update a finding card. **Does not notify** — see Phase 2. |
 | `list_kanban_cards`, `move_kanban_task`, `add_kanban_comment` | Phase 1 saneamento |
-| `search_knowledge_base`, `update_knowledge_base` | Step 0 grounding, Phase 3 lessons |
+| `knowledge_search`, `upload_document` | Step 0 grounding, Phase 3 lessons |
 | `list_agents`, `list_runs` | Step 0 routing, Audit 4 |
 | `create_presentation` | Phase 3 written report |
 | `Bash` → `curl .../api/telegram/report` | Phase 3 **actual Telegram notification** — mandatory, see Phase 3 |

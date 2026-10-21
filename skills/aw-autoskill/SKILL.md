@@ -248,6 +248,6 @@ New skills from this agent MUST be prefixed `aw-autoskill-` so they're identifia
 
 - One-off tasks (single occurrence, no pattern)
 - Things already covered by an existing skill
-- Knowledge that belongs in KB (`update_knowledge_base`) rather than a skill
+- Knowledge that belongs in the KB (`upload_document`) rather than a skill
 - User preferences that belong in auto-memory (`~/.claude/projects/-opt-aw-workspace/memory/`)
 - Anything specific to a single installed app's own internals — that belongs in the app's own repo, contributed via `contributes.skills`, not `native-skills/`

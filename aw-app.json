@@ -202,10 +202,15 @@
         "reason": "Supplies the aw-kanban MCP server the analyst opens finding cards through. Non-required: without it the audit still runs and still reports, it just has nowhere to file cards \u2014 degraded, not broken."
       },
       {
-        "id": "kb",
-        "version": ">=0.18.0",
+        "id": "knowledgeable",
+        "version": ">=0.25.0",
         "required": false,
-        "reason": "Supplies search_knowledge_base/load_skill. Non-required, but the audit is materially worse without it: the KB is what stops the analyst from re-reporting findings that are already documented."
+        "reason": "Supplies knowledge_search/upload_document. Non-required, but the audit is materially worse without it: the KB is what stops the analyst from re-reporting findings that are already documented."
+      },
+      {
+        "id": "kb",
+        "required": false,
+        "reason": "Supplies the aw-kb-curator skill the KB Curator agent runs on — kb owns that contract because it owns the knowledge base the curator audits. Non-required: without it the agent seeds with no contract to load, same degraded-not-broken shape as the analyst without notion."
       }
     ]
   },
