@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "maintenance-agents",
   "name": "Maintenance Agents",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it \u2014 plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
   "tier": "inprocess",
   "requires_ui_refresh": false,
@@ -33,6 +33,11 @@
         "id": "aw-autoskill",
         "path": "skills/aw-autoskill/SKILL.md",
         "description": "Analyzes recent Claude Code sessions in this workspace to discover skill-creation opportunities and automatically create or update aw-autoskill-<name> skills. Ships compile_sessions.py alongside it \u2014 the skill is useless without that script."
+      },
+      {
+        "id": "aw-kanban-sweeper",
+        "path": "skills/aw-kanban-sweeper/SKILL.md",
+        "description": "Daily sweep that closes out stale In Progress / Need Human Kanban cards \u2014 resumes the original agent session to ask whether the work is actually done, or routes a stale escalation to product-owner/architect. Never decides a verdict itself."
       }
     ],
     "agents": {
@@ -115,6 +120,27 @@
           "hidden_from_flow": false,
           "icon": "book-open",
           "color": "#0ea5a4"
+        },
+        {
+          "slug": "kanban-sweeper",
+          "name": "Kanban Sweeper",
+          "description": "Daily sweep of stale In Progress / Need Human Kanban cards — resumes the original agent's session to ask whether the work is actually done, or routes a stale escalation to product-owner/architect. Never decides a verdict itself; never fixes anything.",
+          "system_prompt_file": "prompts/kanban-sweeper.md",
+          "model_slug": "claude-runner-sonnet",
+          "disable_harness_tools": true,
+          "agent_config_slug": "maintenance-agents-config",
+          "skill_slugs": [
+            "aw-kanban-sweeper"
+          ],
+          "capabilities": "Finds Kanban cards stuck In Progress or Need Human for 12h+, checks whether the card's last run actually finished, and resumes that run's own session (or routes a stale escalation) to get it unstuck. Read-only with respect to code; never calls mark_flow_done on its own run.",
+          "use_cases": [
+            "run the stale-card sweep",
+            "why are these cards still In Progress",
+            "close out abandoned Kanban cards"
+          ],
+          "hidden_from_flow": true,
+          "icon": "wind",
+          "color": "#38bdf8"
         }
       ]
     },
@@ -160,6 +186,20 @@
           {
             "kind": "daily",
             "time": "03:00"
+          }
+        ],
+        "enabled": false
+      },
+      {
+        "name": "Kanban sweep — stale In Progress / Need Human",
+        "type": "agent_prompt",
+        "agent_slug": "kanban-sweeper",
+        "prompt": "/aw-kanban-sweeper\n\nRun the stale-card sweep as defined in the aw-kanban-sweeper skill: Batch 1 stale In Progress cards (run-check first, resume or fallback-dispatch), Batch 2 Need Human complement if Batch 1 didn't fill 5 slots (route to product-owner or architect by the latest comment). Comment on every card you touch. End with a plain-text report. Do not call mark_flow_done.",
+        "reuse_session": false,
+        "schedules": [
+          {
+            "kind": "daily",
+            "time": "04:00"
           }
         ],
         "enabled": false
