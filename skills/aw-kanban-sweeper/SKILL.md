@@ -63,23 +63,32 @@ list_kanban_cards(status="running", limit=100, order="edited")
 For each candidate card:
 
 ```
-get_kanban_properties(page_id, properties=["AgentRunId"])
+list_runs(notion_task_id=page_id, limit=1)
 ```
 
-* If the value is **not a 32-character hex run id** (e.g. a lease token like
-  `mt:<uuid>` or `sweep:<uuid>` that `claim_card()` left mid-flight, or
-  anything else that isn't a run id) — **skip**, note why.
-* Otherwise:
+This is the **primary, pinned lookup** — `list_runs` forwards `notion_task_id`
+straight to AP-MT's `GET /api/runs?notion_task_id=...`, the exact filter
+`invoke_kanban_agent` already uses internally to find "the run for this
+card." Property reads, board scans, and fuzzy matching on the card itself are
+all dead ground — proved unreliable escalating this exact gap — so none of
+them gate the skip/qualify decision below.
 
-  ```
-  get_run(run_id=<AgentRunId>)
-  ```
+* **No row returned** → **skip, reason: "no dispatched run found."**
+* **A row is returned** — it is, by construction, the single most recent run
+  dispatched against this card. Check its `status`:
+  * `success` or `error` → **terminal, qualifies.** Carry the row itself
+    (`id`, `status`, `ended_at`, `source_slug`, `session_id`) into the next
+    step — no separate `get_run` call needed.
+  * `running` or `pending` (or anything else non-terminal) → **skip, never
+    touch this card.**
 
-  * `status` in `{success, error}` → **terminal, qualifies**.
-  * `status` in `{running, pending}` (or anything non-terminal) → **skip,
-    never touch this card.**
-  * Run not found / lookup error → skip, note why (fail closed, same as the
-    board's own claim logic).
+`AgentRunId` (`get_kanban_properties(page_id, properties=["AgentRunId"])`) is
+a **shortcut hint only**, and only when it holds a canonical 32-char hex run
+id — use it to sanity-check the row `list_runs` returned (same id = expected;
+a mismatch is not by itself a reason to distrust `list_runs`, which reads the
+real table that `AgentRunId` is just a property mirror of). Never decide off
+`AgentRunId` alone, and never fall back to it when `list_runs` returns
+nothing — that would reintroduce the exact unreliable path this replaces.
 
 ### Acting on a qualifying card
 
@@ -96,8 +105,8 @@ work.
 """)
 ```
 
-`<N>` = hours since that run's own finish time (`get_run`'s timestamp), not
-since `last_edited_time`.
+`<N>` = hours since that run's own finish time (the `ended_at` on the row the
+run check already carried forward), not since `last_edited_time`.
 
 * **`invoke_kanban_agent` succeeds** (resumed a real session) → that is the
   action. The resumed session's own eventual outcome is not yours to wait
