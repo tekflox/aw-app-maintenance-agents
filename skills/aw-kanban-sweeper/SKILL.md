@@ -43,6 +43,49 @@ same card can be picked again.
 
 ---
 
+## Back-off — LastSweptAt
+
+`LastSweptAt` (a Notion `date` property) records the last time the sweeper
+touched this card without its status changing. The sweeper is its **only**
+writer, and it always posts its own comment **before** stamping — so "a
+comment newer than `LastSweptAt`" means something happened on the card since
+the last sweep that the sweeper hasn't accounted for yet.
+
+**Back-off rule** — applies to **both** batches, after the staleness filter,
+before anything else:
+
+* `LastSweptAt` unset → the candidate proceeds as today.
+* `LastSweptAt` set → the candidate qualifies **only if** at least one
+  comment on the card has a timestamp strictly after `LastSweptAt`.
+  Otherwise **skip**, reason: `"backed off: last swept <ts>, no comment
+  since"`.
+
+If nothing was done on the card since the last sweep, there is no reason to
+push it again — you would just get the same result. **Any** comment after
+`LastSweptAt` re-arms eligibility, no matter how old `LastSweptAt` is, and no
+matter who wrote it — human or agent, no authorship distinction.
+
+**How to check:**
+
+* Stamp: `get_kanban_properties(page_id, properties=["LastSweptAt"])` → an
+  ISO string, or `null` if never swept (the date flattens to its start
+  value, `client.py:389-390`).
+* Latest comment: `get_kanban_card(page_id, include_comments=true)` →
+  `comments_md` lines read `"- **<created_time>** — text"`, oldest →
+  newest; take the last line's timestamp.
+* Compare as instants, not strings — the stamp may read `+00:00` while a
+  comment timestamp reads `Z`.
+
+**Fail open.** If comments can't be read, a timestamp doesn't parse, or the
+thread might be truncated (the comments fetch in
+`repos/aw-app-notion/notion_app/sync.py:383-401` pulls a single page of 100
+comments with no pagination — on a 100+-comment card the **newest** comments
+are exactly the ones missing), treat the card as eligible. One wasted touch
+beats a card permanently stranded by a read that can't be trusted. For huge
+threads see the `aw-autoskill-huge-kanban-card-comments` skill.
+
+---
+
 ## Batch 1 — stale In Progress
 
 ```
@@ -54,9 +97,17 @@ list_kanban_cards(status="running", limit=100, order="edited")
    the 12h line first, not the oldest zombies — that is deliberate: a card
    just past the threshold is the one most likely to still have a live,
    resumable session and a human still paying attention to it).
-3. Walk down that list and run the **run check** below on each; take the
-   **first 5 that pass**. Fewer than 5 passing is fine — do not relax the
-   staleness or terminal-run rules to fill the quota.
+3. Walk down that list and, for each candidate, run the **back-off check**
+   first, then the **run check** below — in that order, so a card that's
+   already backed off never costs a `list_runs` call. Take the **first 5
+   that pass both**. Fewer than 5 passing is fine — do not relax the
+   staleness, back-off, or terminal-run rules to fill the quota.
+
+### Back-off check
+
+See "Back-off — LastSweptAt" above. A card that fails it is **skipped**,
+reported the same way as a run-check skip — reason `"backed off: last swept
+<ts>, no comment since"`.
 
 ### Run check (non-negotiable exclusion)
 
@@ -132,10 +183,28 @@ Then, either way:
 
 ```
 add_kanban_comment(page_id, text="🧹 kanban-sweeper: <what was done and why>")
+set_kanban_property(page_id, "LastSweptAt", <now>)
 ```
 
-This is both the audit trail and the cooldown — it resets `last_edited_time`
-so this card won't be picked again for 12h even if nothing else changes.
+Comment first, stamp second — `LastSweptAt` must land at or after the
+comment's own timestamp, never before it. `<now>` is the current UTC time as
+full ISO-8601 **with** the time component (e.g.
+`"2026-11-06T04:03:17+00:00"`) — never date-only; `LastSeenAt`'s date-only
+shape is exactly the trap that makes it useless for this, and
+`build_property_payload` passes the string straight into `{"date": {"start":
+...}}` (`client.py:368-369`), so whatever you write is exactly what the next
+sweep's comparison gets.
+
+This pair covers every touch that leaves status unchanged — a successful
+resume, a fallback dispatch, or a "blocked, can't help" comment-only touch.
+If `set_kanban_property` fails after the comment already posted, report it
+and move on — the card just stays eligible next run, which is the safe
+direction.
+
+The comment is both the audit trail and the cooldown — it resets
+`last_edited_time` so this card won't be picked again for 12h even if
+nothing else changes; the stamp is the separate, new back-off clock on top
+of it.
 
 ---
 
@@ -147,21 +216,31 @@ Only runs if Batch 1 picked fewer than 5. Needed = `5 - len(batch1_picked)`.
 list_kanban_cards(status="need_human", limit=100, order="edited")
 ```
 
-Same staleness filter (`last_edited_time` ≥12h ago), same newest-first walk,
-take up to `needed` cards. **No run-check here** — a Need Human card by
-definition has nobody actively working it, so there is no in-flight run to
-collide with.
+Same staleness filter (`last_edited_time` ≥12h ago), same newest-first walk.
+Walk candidates until `needed` of them are **picked** — a candidate is not
+picked until it passes the back-off check below; failing it does not count
+against `needed`. **No run-check here** — a Need Human card by definition
+has nobody actively working it, so there is no in-flight run to collide
+with.
 
-For each picked card:
+For each candidate:
 
 ```
+get_kanban_properties(page_id, properties=["LastSweptAt"])
 get_kanban_card(page_id, include_comments=true)
 ```
 
-Read **only the most recent comment** — that is the escalation reason. Some
-of these cards carry 150K+ chars of comment history; do not read the whole
-thing, slice the tail. (See the `aw-autoskill-huge-kanban-card-comments`
-skill if the response needs that treatment.)
+The `get_kanban_card` call does double duty: its `comments_md`'s last line
+is both the back-off comparison (see "Back-off — LastSweptAt" above) and,
+once the card passes, the escalation reason — no second read needed. Run
+the back-off check first; a candidate that fails it is **skipped**, reported
+the same way as in Batch 1, and the card is left untouched.
+
+Once a candidate passes back-off, it is picked. Read **only the most recent
+comment** — that is the escalation reason. Some of these cards carry 150K+
+chars of comment history; do not read the whole thing, slice the tail. (See
+the `aw-autoskill-huge-kanban-card-comments` skill if the response needs that
+treatment.)
 
 Decide **fresh, every time — never hardcoded** what kind of question the
 latest comment is raising:
@@ -187,7 +266,53 @@ Then, same as Batch 1:
 
 ```
 add_kanban_comment(page_id, text="🧹 kanban-sweeper: <what was done and why>")
+set_kanban_property(page_id, "LastSweptAt", <now>)
 ```
+
+Same ordering and format as Batch 1's stamp above — comment first, full
+ISO-8601 timestamp with the time component, fail-and-move-on if the stamp
+write errors.
+
+---
+
+## Not needed — archiving a moot card
+
+Rule 1 says you never decide whether work is complete. This is a narrow,
+explicitly-granted exception to it, not a reversal: archiving here is a
+**mootness** call, not a completeness verdict. You are not saying the work
+is done; you are saying the work no longer needs doing.
+
+The sweeper may move a card out of the sweep with:
+
+```
+move_kanban_task(status="archived", comment="🧹 kanban-sweeper: not needed — <evidence>")
+```
+
+**Only** on narrow, checkable evidence:
+
+* (a) the card's work targets a known-retired/deactivated repo — today that
+  is `agentic-workspace` (see the `agentic-workspace-repo-is-fully-deactivated`
+  KB entry; check the knowledge base at sweep time for the current list, do
+  not treat this as fixed), or
+* (b) the work verifiably already shipped elsewhere — name the commit or
+  card in the comment.
+
+Any doubt → the normal path, not archive.
+
+This maps to the live Notion option **"Archived"** (the default logical→
+option map in `repos/aw-app-notion/notion_app/kanban/config.py:22`, confirmed
+live on the data source). `move_card` posts the comment before the status
+patch when one is given (`cards.py:376-405`), so pass the evidence as the
+`comment` argument, not a separate `add_kanban_comment` call.
+
+**No `LastSweptAt` stamp on this path** — status changed, so the ordinary
+"touched without a status change" stamping rule doesn't apply.
+
+**Do not use the board's literal "Not Needed" option** — it has no logical
+key in the status map, so a card moved there disappears from
+`list_kanban_cards`'s status enum and the sweeper (and everything else)
+loses track of it entirely. Frederico chose `archived` specifically to
+avoid that.
 
 ---
 
@@ -207,6 +332,9 @@ End with a plain-text report, not a presentation and not `mark_flow_done`:
 * Cards **picked**, in order, with why they were chosen over the others.
 * Cards **skipped**, and why — non-terminal run, lease-token/malformed
   `AgentRunId`, run lookup failed, or simply past the quota.
+* Cards skipped as **backed off**, with the `LastSweptAt` value that caused
+  the skip.
+* Cards **archived as not-needed**, with the evidence cited for each.
 * Per picked card: what action was taken (resumed / fallback-dispatched /
   routed to product-owner vs architect and why), and the **observed outcome
   so far** — if the resumed/dispatched session hasn't concluded by the time

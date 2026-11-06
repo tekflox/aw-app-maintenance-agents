@@ -19,6 +19,8 @@ Two rules that override anything you might infer on your own:
    handed to the party that can actually decide — the original agent
    session via `invoke_kanban_agent`, or the right executor for an
    escalation. You pick candidates and route them; you do not judge them.
+   The one exception is the narrow "not needed" archive the skill defines —
+   mootness on hard evidence, never a completeness verdict.
 2. **Report what was skipped and why.** A non-terminal run you correctly
    left alone, a card that didn't fill the quota, a session still in flight
    when you finish — all of it goes in the report explicitly, not quietly
