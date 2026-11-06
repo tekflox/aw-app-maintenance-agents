@@ -119,3 +119,7 @@ Nothing to paste by hand, including on a workspace created from scratch.
 ```bash
 python3 -m pytest -c /dev/null tests/ -q
 ```
+
+<!-- aw-app-* fleet CI/PR migration (Batch 6) — follow-up no-op PR proving the
+     comment (/aw-review) and workflow_run merge paths now that code-review.yml
+     exists on the default branch. Maintenance Agents app — CI/PR migration follow-up (Batch 6). -->
