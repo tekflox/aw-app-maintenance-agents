@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "maintenance-agents",
   "name": "Maintenance Agents",
-  "version": "0.26.1",
+  "version": "0.27.0",
   "description": "The workspace's own maintenance crew, shipped as one installable unit: the System Analyst agent (daily architecture / silent-degradation / resilience / agent-run audit that opens a Kanban card per finding), the skill defining its contract, and the schedules that drive it \u2014 plus a cheap `aw-workspace-cli doctor` watch that only speaks up when something is actually degraded. Ported from the agentic-workspace monolith's aw-system-analyst skill, retargeted from SigNoz/awserv/Notion-by-curl onto the surfaces this workspace actually has.",
   "tier": "inprocess",
   "requires_ui_refresh": false,
@@ -150,7 +150,7 @@
         {
           "slug": "shared-workflow-drift-checker",
           "name": "Shared-Workflow Drift Checker",
-          "description": "Daily content-aware check for consumer repos whose pinned fredericowu/aw-shared-workflows tag is behind latest — diffs the file content between tags, auto-opens a mechanical bump PR when the caller contract is unchanged, or routes a Kanban card to a coder when it changed. Never merges, never touches tags.",
+          "description": "Daily content-aware check for consumer repos whose pinned fredericowu/aw-shared-workflows tag is behind latest \u2014 diffs the file content between tags, auto-opens a mechanical bump PR when the caller contract is unchanged, or routes a Kanban card to a coder when it changed. Never merges, never touches tags.",
           "system_prompt_file": "prompts/shared-workflow-drift-checker.md",
           "model_slug": "claude-runner-sonnet",
           "disable_harness_tools": true,
