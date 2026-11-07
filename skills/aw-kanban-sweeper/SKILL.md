@@ -111,32 +111,52 @@ reported the same way as a run-check skip — reason `"backed off: last swept
 
 ### Run check (non-negotiable exclusion)
 
-For each candidate card:
+For each candidate card, two lookups — a cheap liveness probe, then the
+pinned one:
 
 ```
-list_runs(notion_task_id=page_id, limit=1)
+list_runs(notion_task_id=page_id, limit=1)                          # 1. liveness probe, unfiltered
+list_runs(notion_task_id=page_id, category="work", limit=1)         # 2. the pinned lookup
 ```
 
-This is the **primary, pinned lookup** — `list_runs` forwards `notion_task_id`
-straight to AP-MT's `GET /api/runs?notion_task_id=...`, the exact filter
-`invoke_kanban_agent` already uses internally to find "the run for this
-card." Property reads, board scans, and fuzzy matching on the card itself are
-all dead ground — proved unreliable escalating this exact gap — so none of
-them gate the skip/qualify decision below.
+`list_runs` forwards both `notion_task_id` and `category` straight to AP-MT's
+`GET /api/runs?notion_task_id=...&category=...`. `category` distinguishes a
+real agent/workflow dispatch (`"work"`, the default) from a monitor/wrapper
+dispatch like `monitor-shell` (`"monitor"`, stamped at dispatch time) — before
+this column existed, the sweep (and `invoke_kanban_agent`'s own internal
+lookup) could resume a wrapper row that happened to carry a `session_id`,
+sending "is this done?" to the wrapper's own empty conversation instead of
+the agent that actually did the work (Kanban
+4115bf3b-9510-8156-9e5e-f6c772ad2538). Property reads, board scans, and fuzzy
+matching on the card itself are all dead ground — proved unreliable
+escalating this exact gap — so none of them gate the skip/qualify decision
+below.
 
-* **No row returned** → **skip, reason: "no dispatched run found."**
-* **A row is returned** — it is, by construction, the single most recent run
-  dispatched against this card. Check its `status`:
-  * `success` or `error` → **terminal, qualifies.** Carry the row itself
-    (`id`, `status`, `ended_at`, `source_slug`, `session_id`) into the next
-    step — no separate `get_run` call needed.
-  * `running` or `pending` (or anything else non-terminal) → **skip, never
-    touch this card.**
+1. **Liveness probe (unfiltered, call ①):** if the newest row for this card
+   — of *any* category — has `status` `running` or `pending`, **skip, never
+   touch this card.** This preserves today's conservatism even when the
+   live row is a monitor/wrapper dispatch (e.g. a still-running
+   `monitor-shell` watch) rather than the real agent session — a card is not
+   touched while anything tied to it is still in flight, regardless of which
+   dispatch category that is.
+2. **The pinned lookup (`category="work"`, call ②)** — only reached once
+   call ① confirmed nothing non-terminal is in flight:
+   * **No row returned** → **skip, reason: "no dispatched run found."** A
+     card whose only Run rows are monitor/wrapper dispatches correctly reads
+     as having no dispatched work, not as resumable via the wrapper.
+   * **A row is returned** — it is, by construction, the single most recent
+     **real** (non-monitor) run dispatched against this card. Check its
+     `status`:
+     * `success` or `error` → **terminal, qualifies.** Carry the row itself
+       (`id`, `status`, `ended_at`, `source_slug`, `session_id`) into the
+       next step — no separate `get_run` call needed.
+     * `running` or `pending` (or anything else non-terminal) → **skip,
+       never touch this card.**
 
 `AgentRunId` (`get_kanban_properties(page_id, properties=["AgentRunId"])`) is
 a **shortcut hint only**, and only when it holds a canonical 32-char hex run
-id — use it to sanity-check the row `list_runs` returned (same id = expected;
-a mismatch is not by itself a reason to distrust `list_runs`, which reads the
+id — use it to sanity-check the row call ② returned (same id = expected; a
+mismatch is not by itself a reason to distrust `list_runs`, which reads the
 real table that `AgentRunId` is just a property mirror of). Never decide off
 `AgentRunId` alone, and never fall back to it when `list_runs` returns
 nothing — that would reintroduce the exact unreliable path this replaces.
