@@ -132,6 +132,17 @@ matching on the card itself are all dead ground — proved unreliable
 escalating this exact gap — so none of them gate the skip/qualify decision
 below.
 
+**Deploy-order dependency.** `category` only has an effect once BOTH
+agents-platform-multitenant (the `Run.category` column + the `GET
+/api/runs?category=...` filter) and the MCP `list_runs` tool
+(aw-app-agents-platform-runners) have shipped. Until then the param is
+silently ignored server-side — call ② degenerates to exactly call ①'s
+unfiltered behavior, i.e. today's pre-fix state, not a new failure mode. If
+this app is released/reinstalled before those two land, the sweeper is not
+worse off than it is today; it just isn't protected yet. Sequence
+deploys so those two ship first, then release this app — otherwise this
+section describes a protection that reads as live but silently isn't.
+
 1. **Liveness probe (unfiltered, call ①):** if the newest row for this card
    — of *any* category — has `status` `running` or `pending`, **skip, never
    touch this card.** This preserves today's conservatism even when the
@@ -140,7 +151,11 @@ below.
    touched while anything tied to it is still in flight, regardless of which
    dispatch category that is.
 2. **The pinned lookup (`category="work"`, call ②)** — only reached once
-   call ① confirmed nothing non-terminal is in flight:
+   call ① confirmed nothing non-terminal is in flight. Pre-existing Run rows
+   from before this column existed are backfilled to `"work"` by the
+   migration itself (a DDL-level `ALTER TABLE ... DEFAULT 'work'`, not an
+   ORM-only default) — they never read as null/unset, so no older real
+   dispatch is excluded here.
    * **No row returned** → **skip, reason: "no dispatched run found."** A
      card whose only Run rows are monitor/wrapper dispatches correctly reads
      as having no dispatched work, not as resumable via the wrapper.
