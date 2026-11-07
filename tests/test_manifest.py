@@ -87,6 +87,9 @@ def test_the_autoskill_skill_ships_the_script_it_cannot_run_without(manifest):
     entry = next(s for s in manifest["contributes"]["skills"] if s["id"] == "aw-autoskill")
     skill_dir = (APP_DIR / entry["path"]).parent
     assert (skill_dir / "compile_sessions.py").is_file()
+    # Same guarantee for the one-shot registry backfill script the
+    # registry-publish section of SKILL.md points at by path.
+    assert (skill_dir / "backfill_skills_registry.py").is_file()
 
 
 def test_referenced_files_exist(manifest):
