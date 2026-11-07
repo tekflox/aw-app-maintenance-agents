@@ -65,6 +65,19 @@ re-qualified at the very next sweep). The rule and the comparison above are
 unchanged, only the timing of the write moved, see "Acting on a qualifying
 card" and "Deferred stamp" below.
 
+Don't reach for `register_callback` for this — it watches the dispatched
+run via a polling loop capped at a hard ~1h wall-clock ceiling
+(`_CALLBACK_WATCH_TIMEOUT_S`, `agents-platform-multitenant/backend/app/
+core/wakeups.py`); past that it gives up, tells sysadmins over Telegram,
+and never wakes the sweeper at all, silently leaving `LastSweptAt` unset
+forever for that card. A resumed/fallback turn told explicitly not to redo
+or extend the work should finish in minutes, but "should" is not a
+guarantee worth building the whole fix on, since the failure mode it
+risks is exactly the double-fire this stamp exists to prevent, just for
+the slowest cases. `schedule_wakeup` (a plain timer, no polling ceiling,
+clamped 10s..24h) is the primitive used instead — see "Deferred stamp"
+below for the bounded retry/give-up shape around it.
+
 **Back-off rule** — applies to **both** batches, after the staleness filter,
 before anything else:
 
@@ -210,9 +223,12 @@ run check already carried forward), not since `last_edited_time`.
 
 * **`invoke_kanban_agent` succeeds** (resumed a real session) → that is the
   action, and its JSON result carries a `run_id` for the dispatched turn.
-  Keep the `(page_id, run_id)` pair, you need it for "Deferred stamp"
-  below. The resumed session's own eventual outcome is not yours to wait
-  for or report as final — see "What to report" below.
+  Keep the `(page_id, run_id)` pair — this card's `Status` property at the
+  time of touch is `"In Progress"` by construction (the raw Notion option
+  label for Batch 1's `running` filter, the same value `get_kanban_card`
+  will hand back later), so there is nothing extra to capture for
+  "Deferred stamp" below. The resumed session's own eventual outcome is
+  not yours to wait for or report as final — see "What to report" below.
 * **`invoke_kanban_agent` returns an explainable failure** (most commonly:
   "the latest run for this card has no session_id" — it never opened a
   resumable CLI session) → **fallback**:
@@ -235,72 +251,14 @@ Then, either way:
 
 ```
 add_kanban_comment(page_id, text="🧹 kanban-sweeper: <what was done and why>")
-register_callback(run_id=<the run_id from whichever call above fired>)
 ```
 
-Comment first, register second, never stamp `LastSweptAt` here directly.
-The stamp is deferred to a later wake-up (see "Deferred stamp" right
-below) once the dispatched run's own reply has actually landed. If
-`register_callback` itself fails after the comment already posted, report
-it and move on, the card just stays eligible next run, which is the safe
-direction, same as a failed stamp write used to be.
+Keep `(page_id, run_id, "In Progress")` in mind. Do **not** call
+`set_kanban_property` here, and do not call `register_callback` either —
+the stamp for every card touched across both batches is handled together,
+once, at the end of the whole pass. See "Deferred stamp" after Batch 2.
 
-### Deferred stamp — closing the loop on wake-up
-
-`register_callback(run_id=...)` re-invokes THIS session once that run goes
-terminal, carrying its result. Expect to be woken up this way once per
-card you touched, each at its own unpredictable time, not all together
-and not necessarily in the order you touched the cards. Runs resuming the
-same session are serialized server-side (one at a time, FIFO), so several
-wake-ups landing close together queue safely rather than colliding, you
-still only handle one card per wake-up turn.
-
-On each such wake-up:
-
-1. Match the run_id in the wake-up to the `(page_id, run_id)` pair you
-   recorded for it while dispatching.
-2. Check the card's current status (`get_kanban_card` or
-   `get_kanban_properties`). If it no longer matches the status this card
-   had when you touched it (the resumed/dispatched work moved it, e.g. to
-   done or need_human when it wasn't need_human already), **skip the
-   stamp entirely**, a status change already takes the card out of the
-   back-off's scope, same reasoning as "Not needed" below.
-3. Otherwise, stamp now:
-
-   ```
-   set_kanban_property(page_id, "LastSweptAt", <now>)
-   ```
-
-   `<now>` is the current UTC time as full ISO-8601 **with** the time
-   component (e.g. `"2026-11-06T04:03:17+00:00"`), never date-only,
-   `LastSeenAt`'s date-only shape is exactly the trap that makes it
-   useless for this, and `build_property_payload` passes the string
-   straight into `{"date": {"start": ...}}` (`client.py:368-369`), so
-   whatever you write is exactly what the next sweep's comparison gets.
-   Compute it fresh, immediately before this call, for this card only,
-   never reuse a value from an earlier card's wake-up or from the sweep
-   pass itself. `set_kanban_property` has no server-side notion of "now";
-   a shared timestamp reused across cards defeats back-off outright, the
-   same failure mode a shared batch-start timestamp caused before this
-   fix (Kanban 4115bf3b-9510-812f-b755-da9ce5b65046, 6 previously-swept
-   cards found sharing one of only two timestamps across groups of 3),
-   just moved to a new place to get it wrong.
-
-   If `set_kanban_property` fails here, report it and move on, the card
-   stays eligible next run, the safe direction.
-
-No separate report is needed for this wake-up turn beyond a short note of
-what you did, this is bookkeeping closing out a card from a previous
-pass, not a new sweep.
-
-This deferred-stamp mechanism covers every touch that leaves status
-unchanged, a successful resume or a fallback dispatch, in either batch. A
-"blocked, can't help" comment-only touch with no dispatch at all has
-nothing to register a callback on, so for that case alone, stamp
-`set_kanban_property(page_id, "LastSweptAt", <now>)` inline, right after
-the comment, exactly as before, there is no reply to wait for.
-
-The comment is both the audit trail and the cooldown, it resets
+The comment is both the audit trail and the cooldown — it resets
 `last_edited_time` so this card won't be picked again for 12h even if
 nothing else changes; the stamp (whenever it lands) is the separate, new
 back-off clock on top of it.
@@ -366,15 +324,106 @@ Then, same as Batch 1:
 
 ```
 add_kanban_comment(page_id, text="🧹 kanban-sweeper: <what was done and why>")
-register_callback(run_id=<the run_id just returned>)
 ```
 
-Same ordering as Batch 1's deferred stamp above — comment first, register
-second, never stamp inline here. The stamp itself happens on a later
-wake-up (see "Deferred stamp" under Batch 1), applying the same
-status-unchanged check: a card the routed agent actually moved out of
-Need Human needs no stamp at all. Compute `<now>` fresh at the wake-up,
-never Batch 1's value, never an earlier Batch 2 card's value.
+Keep `(page_id, run_id, "Need Human")` in mind — same as Batch 1, do not
+stamp or register anything here. See "Deferred stamp" right below for how
+every card touched in this pass, Batch 1 and Batch 2 together, gets its
+stamp.
+
+---
+
+## Deferred stamp — closing the loop for the whole pass
+
+By the time you reach here you are holding zero or more
+`(page_id, run_id, status_at_touch)` triples — one per card you actually
+dispatched/resumed into in Batch 1 or Batch 2 above (not for a card that
+was skipped, backed off, or archived — those never got a run_id in the
+first place). `status_at_touch` is always exactly `"In Progress"` for a
+Batch 1 triple and exactly `"Need Human"` for a Batch 2 one — the raw
+Notion `Status` option label behind the batch's own selection filter
+(`running` → `"In Progress"`, `need_human` → `"Need Human"`,
+`repos/aw-app-notion/notion_app/kanban/config.py`'s `DEFAULT_STATUSES`),
+and the exact string `get_kanban_card`/`get_kanban_properties` hand back
+for that property — nothing to look up separately.
+
+**No triples at all** (every card this pass was skipped/backed-off/not-
+needed, nothing dispatched) → nothing to defer, end your report now.
+
+**One or more triples** → arm exactly one wake-up for the whole set:
+
+```
+schedule_wakeup(
+  delay_seconds=1200,
+  prompt="Resolve the pending LastSweptAt stamps from the sweep pass that just ran.",
+  reason="waiting on dispatched/resumed sessions to reply before stamping LastSweptAt",
+)
+```
+
+1200s (20 min) is generous for a turn whose entire job is "read your own
+report, call `mark_flow_done` or escalate — do not redo or extend the
+work" (the message you sent in "Acting on a qualifying card"), which
+should normally resolve in low single-digit minutes. `register_callback`
+was deliberately not used here — see "Back-off — LastSweptAt" above for
+why its ~1h polling ceiling makes it the wrong primitive for this.
+
+On that wake-up (a fresh turn in this same session, your triples are
+still in your own context), for each triple still pending:
+
+1. Check the run's status (`get_run(run_id=...)`, the cheap status-only
+   lookup — you don't need the full event trace `get_run_detail` gives
+   you).
+2. **Not terminal yet** → leave this triple pending, move to the next one.
+3. **Terminal** → check the card's CURRENT `Status`
+   (`get_kanban_properties(page_id, properties=["Status"])` or
+   `get_kanban_card`). If it no longer equals `status_at_touch` (the
+   resumed/dispatched work moved it, e.g. to `"Done"` or `"Archived"`, or
+   a Batch 2 card out of `"Need Human"`), the card already dropped out of
+   the back-off's scope — **skip the stamp**, drop this triple, done with
+   it. Otherwise stamp now:
+
+   ```
+   set_kanban_property(page_id, "LastSweptAt", <now>)
+   ```
+
+   `<now>` is the current UTC time as full ISO-8601 **with** the time
+   component (e.g. `"2026-11-06T04:03:17+00:00"`), never date-only —
+   `LastSeenAt`'s date-only shape is exactly the trap that makes it
+   useless for this, and `build_property_payload` passes the string
+   straight into `{"date": {"start": ...}}` (`client.py:368-369`), so
+   whatever you write is exactly what the next sweep's comparison gets.
+   Compute it fresh, immediately before this call, for this triple only
+   — never reuse a value across triples or from the sweep pass itself. A
+   shared timestamp defeats back-off outright, the same failure mode a
+   shared batch-start timestamp caused before this fix (Kanban
+   4115bf3b-9510-812f-b755-da9ce5b65046 — 6 previously-swept cards found
+   sharing one of only two timestamps across groups of 3), just moved to
+   a new place to get it wrong. If the write fails, report it and move
+   on, the card stays eligible next run, the safe direction. Either way,
+   drop this triple once handled.
+
+4. If any triples are **still pending** (not yet terminal) once you've
+   gone through all of them, re-arm one more `schedule_wakeup` (same
+   1200s, same prompt shape) from this new turn for the remaining
+   triples only — you get a fresh one-wake-up allowance each turn.
+   **Cap it at 3 rounds total** (~1h of real waiting). If a triple is
+   still pending after the 3rd round — a real outlier, since the
+   dispatched turn was explicitly told not to redo or extend the work —
+   stop waiting and stamp it anyway, noting in your own notes that the
+   underlying run was still in flight when stamped. A stamp that is a
+   few minutes early on a rare straggler is a far smaller cost than the
+   alternative this whole fix exists to avoid: `LastSweptAt` never
+   getting written at all, and the exact same double-fire recurring on
+   every future sweep for that card specifically.
+
+No separate full report is needed for a deferred-stamp wake-up — a short
+note of what was resolved (stamped / skipped / still pending) is enough,
+this is bookkeeping closing out a previous pass, not a new sweep.
+
+A "blocked, can't help" comment-only touch with no dispatch at all never
+produces a triple, there is no run to wait on — stamp
+`set_kanban_property(page_id, "LastSweptAt", <now>)` inline, right after
+the comment, exactly as before.
 
 ---
 
@@ -443,11 +492,11 @@ End with a plain-text report, not a presentation and not `mark_flow_done`:
   so far** — if the resumed/dispatched session hasn't concluded by the time
   you report, say that plainly. Its eventual verdict is its own, not yours
   to wait for or fabricate.
-* Per picked card, say that its `LastSweptAt` stamp is **deferred** via
-  `register_callback`, not written in this pass — it lands (or is
-  correctly skipped, if the card's status changed first) on a later
-  wake-up, see "Deferred stamp". Do not report a card as "stamped" in this
-  pass; it isn't yet.
+* Per picked card, say that its `LastSweptAt` stamp is **deferred**, not
+  written in this pass — it lands (or is correctly skipped, if the card's
+  status changed first) on the `schedule_wakeup` turn described in
+  "Deferred stamp". Do not report a card as "stamped" in this pass; it
+  isn't yet.
 
 Report what is true, not what is tidy — a skipped batch, a run check that
 failed to resolve, or a session still in flight all belong in the report
