@@ -28,6 +28,15 @@ Two rules that override anything you might infer on your own:
    PR-first review/merge loop decides the rest, same as every other Dev Team
    delivery.
 
+This checker is deliberately the **fallback** path, not the only path: when a
+consumer repo already has some other PR open and touching it (e.g. a
+fleet-migration batch), the convention for *that other dispatch* is to bump
+the shared-workflow pin inline on its own PR rather than wait for this
+checker. This checker does not need to implement "is there an open PR
+already on this repo" detection itself — it only has to not flood a repo that
+nothing else bumped, which the idempotency checks in steps 5 and 6 already
+cover.
+
 Not run inside Agents Flow — end with a plain-text report, not
 `mark_flow_done`.
 
@@ -66,33 +75,62 @@ Sort as semver (`v1.10.0` > `v1.9.0`, not lexically) and take the highest
 
 Not a committed list, not local checkouts under `repos/` — both go stale as
 the fleet migration adds consumers weekly and some consumers are never
-cloned here. Use GitHub code search, once per org (code search `q=` is an
-AND of terms, so a cross-org OR needs two calls):
+cloned here.
+
+**Do not use `gh api search/code`.** Verified live (2026-11-07): GitHub's
+REST code-search endpoint is unreliable once a `repo:`/`org:` qualifier is
+added — it returned `total_count: 0` against `tekflox/aw-stack` for the
+exact pin line confirmed present by direct content fetch, and the same
+zero-result failure reproduced against a massively popular, long-indexed
+public repo (`tiangolo/fastapi`) for a trivial term (`def`) and against this
+very workspace's own public repo (`fredericowu/aw-workspace`). An *unscoped*
+query (no `repo:`/`org:`) does return real results (millions of hits), so
+the scoped index specifically is the broken part — `repo:torvalds/linux` is
+the only scoped query that returned anything in testing, suggesting the
+legacy code-search backend only reliably indexes a handful of
+exceptionally old/large repos, not an ordinary consumer repo regardless of
+visibility or popularity. Relying on it means this checker finds zero
+consumers on every run and silently reports "nothing drifted" — worse than
+a visible failure.
+
+Instead, **enumerate repos directly and grep their content** — no search
+index involved, same `contents` API already used to read files:
 
 ```bash
-gh api -X GET search/code --paginate \
-  -f q='uses:fredericowu/aw-shared-workflows org:tekflox' \
-  --jq '.items[] | "\(.repository.full_name) \(.path)"'
+# once per org
+gh repo list tekflox --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner' \
+  > .tmp/shared-workflow-drift/consumers.txt
+gh repo list fredericowu --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner' \
+  >> .tmp/shared-workflow-drift/consumers.txt
 
-gh api -X GET search/code --paginate \
-  -f q='uses:fredericowu/aw-shared-workflows org:fredericowu' \
-  --jq '.items[] | "\(.repository.full_name) \(.path)"'
+# per repo: list its workflow files (skip repos with no .github/workflows — 404)
+gh api repos/<repo>/contents/.github/workflows --jq '.[].name' 2>/dev/null
+
+# per workflow file: fetch content
+gh api repos/<repo>/contents/.github/workflows/<file> --jq '.content' | base64 -d
 ```
 
-Merge and de-duplicate the two result sets (a repo matching both org filters
-is impossible, but a repo with the workflow referenced in more than one
-caller file is not — keep each `(repo, path)` pair). For each `(repo, path)`
-pair, read the live file content:
+This was dry-run live end-to-end against `tekflox/aw-stack` (list its 10
+workflow files, fetch each, grep) and correctly found all 3 real pins
+(`ai-review.yml`, `code-review.yml`, `security-scan.yml` — three different
+shared files, three different tags). A `contents` 404 (repo has no
+`.github/workflows` dir) just means skip that repo — not an error. This path
+also sidesteps `search/code`'s separate, much tighter `code_search` rate
+limit (10 requests/minute) since `contents` uses the normal 5000/hour quota.
 
-```bash
-gh api repos/<repo>/contents/<path> --jq '.content' | base64 -d
-```
-
-and extract every line matching
+For each repo's fetched file content, extract every line matching
 `uses:\s*fredericowu/aw-shared-workflows/\.github/workflows/(\S+?\.yml)@(v\S+)`
 — capture group 1 is `shared_file`, group 2 is `pinned_tag`. A single caller
 file can pin more than one of the three shared workflows; treat each match as
 its own row: `(consumer_repo, consumer_path, shared_file, pinned_tag)`.
+
+**`shared_file_slug` is defined once, deterministically, and reused
+everywhere a slug is needed** (branch names in step 5, the idempotency
+check in step 5, the `finding_key` in step 6): strip the trailing `.yml`
+from `shared_file` and apply no other transformation — e.g.
+`code-review-reusable.yml` → `code-review-reusable`. There are only three
+possible shared files, so this is a fixed, closed set; do not re-derive or
+paraphrase it each run.
 
 ## 3. Compare by content, not tag number
 
@@ -129,11 +167,13 @@ machine-compares).
 ## 5. Mechanical bump — auto-open the PR
 
 **Idempotency check first** — a bump PR already open for this exact
-`(consumer_repo, shared_file, LATEST)` must not get a second one tomorrow:
+`(consumer_repo, shared_file, LATEST)` must not get a second one tomorrow.
+Use the `shared_file_slug` defined in step 2 — never re-slug the filename
+by hand:
 
 ```bash
 gh pr list --repo <consumer_repo> --state open \
-  --head "devteam/wfbump-<LATEST>-<shared_file slug>" --json number
+  --head "devteam/wfbump-<LATEST>-<shared_file_slug>" --json number
 ```
 
 If one exists, skip this row (it's still being reviewed/merged) — do not
@@ -146,10 +186,10 @@ and open the PR:
 git clone -q --depth 1 https://github.com/<consumer_repo>.git \
   .tmp/shared-workflow-drift/<consumer_repo slug>
 cd .tmp/shared-workflow-drift/<consumer_repo slug>
-git checkout -b devteam/wfbump-<LATEST>-<shared_file slug>
+git checkout -b devteam/wfbump-<LATEST>-<shared_file_slug>
 # edit <consumer_path>: the one `uses: ...@<pinned_tag>` line -> `@<LATEST>`
 git commit -am "ci: bump <shared_file> pin to <LATEST>"
-git push -u origin devteam/wfbump-<LATEST>-<shared_file slug>
+git push -u origin devteam/wfbump-<LATEST>-<shared_file_slug>
 gh pr create --repo <consumer_repo> \
   --title "ci: bump <shared_file> pin <pinned_tag> -> <LATEST>" \
   --body "Mechanical pin bump — <shared_file> content changed between <pinned_tag> and <LATEST> (diffstat below), caller contract (permissions/workflow_call inputs/secrets) is unchanged, so this is a one-line bump with no caller-side edit needed.
@@ -178,47 +218,54 @@ it wasn't.
 
 ## 6. Contract-changed bump — route to a coder
 
-Do not touch the consumer repo. Open a Kanban card instead:
+Do not touch the consumer repo. Open a Kanban card instead, using the real
+`create_kanban_task` signature (it has no `body` param — use `input_text`
+for the full body, `description` for the short callout):
 
 ```
 create_kanban_task(
   title="Bump <shared_file> pin + caller permissions on <consumer_repo> (v<pinned_tag> -> v<LATEST>)",
-  body=<see below>,
+  description="<shared_file> drifted v<pinned_tag> -> v<LATEST> on <consumer_repo>; caller contract changed, needs a coder.",
+  finding_key="shared-workflow-drift:<consumer_repo>:<shared_file_slug>:<LATEST>",
+  input_text=<see below>,
   agent_slug="coder-sonnet",
   target_slug="aw-pipelines-test-coverage",
   tags=["testing", "ci-cd", "shared-workflows"],
 )
 ```
 
-Body must include: the consumer repo and caller file path, old and new tag,
-the full diff of the three contract blocks (permissions / workflow_call
-inputs / workflow_call secrets) between `<pinned_tag>` and `<LATEST>`, and an
-explicit citation of `docs/standards/pipeline-testing.md` §2a (the caller
-checklist this mirrors). State plainly that the coder's job is to bump the
-pin **and** edit the consumer's own `permissions:`/secrets to match — not
-just the one-line bump.
+`input_text` must include: the consumer repo and caller file path, old and
+new tag, the full diff of the three contract blocks (permissions /
+workflow_call inputs / workflow_call secrets) between `<pinned_tag>` and
+`<LATEST>`, and an explicit citation of `docs/standards/pipeline-testing.md`
+§2a (the caller checklist this mirrors). State plainly that the coder's job
+is to bump the pin **and** edit the consumer's own `permissions:`/secrets to
+match — not just the one-line bump.
 
-No PR-count cap applies to this path (it's a Kanban card, not a PR) — open
-one per contract-changed row found, every run, same idempotency concern as
-step 5: before opening, check whether an open card with this same
-`(consumer_repo, shared_file, LATEST)` combination already exists
-(`search_knowledge_base` and/or a Kanban search on the title) and skip if so.
+No PR-count cap applies to this path (it's a Kanban card, not a PR) — call
+`create_kanban_task` once per contract-changed row, every run, with the
+`finding_key` above. Dedup is the tool's own job, not yours: a repeat
+`finding_key` bumps the existing card's `OccurrenceCount` instead of
+creating a duplicate (and reopens it if it was already closed as a
+regression) — do not also search Kanban or the knowledge base for an
+existing card first, the `finding_key` already makes that redundant.
 
 ## 7. Report
 
 End with a plain-text report, not a presentation and not `mark_flow_done`:
 
 - `LATEST` tag found.
-- Total `(consumer, shared_file, pinned_tag)` rows discovered, across both
-  org searches.
+- Repos enumerated across both orgs, and total `(consumer, shared_file,
+  pinned_tag)` rows discovered from them.
 - Rows skipped because already at `LATEST`.
 - Rows skipped because content-identical despite a stale tag (the expected
   majority — name them or at least give the count).
 - Rows that were real drift, split mechanical vs. contract-changed.
 - PRs opened (links), PRs skipped as already-open-duplicate, and — if the
   10-PR cap was hit — exactly which rows were deferred to the next run.
-- Kanban cards opened for contract-changed rows (links), and cards skipped
-  as already-existing.
-- Anything you could not verify (a `gh api search/code` call that errored or
-  looked incomplete, a repo you could not clone) — say so explicitly rather
-  than silently treating a failed search as "no consumers there."
+- Kanban cards opened for contract-changed rows (links + `finding_key`), and
+  which ones were a repeat `finding_key` bump rather than a new card.
+- Anything you could not verify (a `contents` fetch that 404'd/errored on a
+  repo you expected to have workflows, a repo you could not clone) — say so
+  explicitly rather than silently treating a failed fetch as "no consumers
+  there."
