@@ -109,6 +109,13 @@ class RegistryClient:
                 return e.code, json.loads(raw)
             except json.JSONDecodeError:
                 return e.code, {"detail": raw.decode(errors="replace")}
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # Connection refused / reset / timed out — not an HTTP response at
+            # all, so there's no status code. Surface it as one, 0, so every
+            # caller's `status == 200` / `status == 404` checks fall through
+            # to the generic failure branch instead of raising past them and
+            # losing every slug already processed this run.
+            return 0, {"detail": str(e)}
 
     def get_content(self, slug: str) -> tuple[int, dict | None]:
         return self._request("GET", f"/api/skills/{slug}/content")
@@ -216,14 +223,22 @@ def main() -> int:
         _write_report(args.report_file, results, args.store_dir, aborted=False)
         return 0
 
-    for slug in slugs[1:]:
-        time.sleep(args.sleep_s)
-        content = (args.store_dir / slug / "SKILL.md").read_text()
-        result = backfill_one(client, slug, content, args.tenant_slug)
-        results.append(result)
-        print(f"{slug}: {result['outcome']}")
-
-    _write_report(args.report_file, results, args.store_dir, aborted=False)
+    aborted = False
+    try:
+        for slug in slugs[1:]:
+            time.sleep(args.sleep_s)
+            content = (args.store_dir / slug / "SKILL.md").read_text()
+            try:
+                result = backfill_one(client, slug, content, args.tenant_slug)
+            except Exception as e:  # noqa: BLE001 — one slug's bug must not sink the other 70's evidence
+                result = {"slug": slug, "outcome": "exception", "error": repr(e)}
+            results.append(result)
+            print(f"{slug}: {result['outcome']}")
+    finally:
+        # Always write what was gathered so far — a crash partway through
+        # must still leave a reviewable report of every slug already
+        # processed, not an empty file.
+        _write_report(args.report_file, results, args.store_dir, aborted=aborted)
 
     counts: dict[str, int] = {}
     for r in results:
