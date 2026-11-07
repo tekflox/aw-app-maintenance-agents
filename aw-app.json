@@ -38,6 +38,11 @@
         "id": "aw-kanban-sweeper",
         "path": "skills/aw-kanban-sweeper/SKILL.md",
         "description": "Daily sweep that closes out stale In Progress / Need Human Kanban cards \u2014 resumes the original agent session to ask whether the work is actually done, or routes a stale escalation to product-owner/architect. Never decides a verdict itself."
+      },
+      {
+        "id": "aw-shared-workflow-drift-checker",
+        "path": "skills/aw-shared-workflow-drift-checker/SKILL.md",
+        "description": "Daily content-aware check for consumer repos whose pinned fredericowu/aw-shared-workflows tag is behind latest \u2014 auto-opens a mechanical one-line bump PR when the caller contract is unchanged, or routes a Kanban card to a coder when it changed."
       }
     ],
     "agents": {
@@ -141,6 +146,27 @@
           "hidden_from_flow": true,
           "icon": "wind",
           "color": "#38bdf8"
+        },
+        {
+          "slug": "shared-workflow-drift-checker",
+          "name": "Shared-Workflow Drift Checker",
+          "description": "Daily content-aware check for consumer repos whose pinned fredericowu/aw-shared-workflows tag is behind latest — diffs the file content between tags, auto-opens a mechanical bump PR when the caller contract is unchanged, or routes a Kanban card to a coder when it changed. Never merges, never touches tags.",
+          "system_prompt_file": "prompts/shared-workflow-drift-checker.md",
+          "model_slug": "claude-runner-sonnet",
+          "disable_harness_tools": true,
+          "agent_config_slug": "maintenance-agents-config",
+          "skill_slugs": [
+            "aw-shared-workflow-drift-checker"
+          ],
+          "capabilities": "Discovers every consumer of fredericowu/aw-shared-workflows via live GitHub code search, diffs each pinned file's content against the latest tag, and either opens a one-line bump PR (caller contract unchanged) or a Kanban card routed to a coder (contract changed). Read-only with respect to aw-shared-workflows itself.",
+          "use_cases": [
+            "run the shared-workflow drift check",
+            "which repos are behind the latest aw-shared-workflows tag",
+            "is this repo's shared-workflow pin actually stale or just tag-stale"
+          ],
+          "hidden_from_flow": true,
+          "icon": "git-pull-request",
+          "color": "#e2793d"
         }
       ]
     },
@@ -214,6 +240,20 @@
           {
             "kind": "daily",
             "time": "05:00"
+          }
+        ],
+        "enabled": false
+      },
+      {
+        "name": "Shared-workflow drift check",
+        "type": "agent_prompt",
+        "agent_slug": "shared-workflow-drift-checker",
+        "prompt": "/aw-shared-workflow-drift-checker\n\nRun the full daily drift check as defined in the aw-shared-workflow-drift-checker skill: discover the latest aw-shared-workflows tag, discover consumers live via gh code search, diff each pinned file's content against latest (skip tag-stale-but-content-current pins), classify real drift as mechanical or contract-changed, auto-open a bump PR for mechanical rows (capped at 10/run) or a Kanban card for contract-changed rows, and end with a plain-text report. Never merge anything; never touch aw-shared-workflows itself.",
+        "reuse_session": false,
+        "schedules": [
+          {
+            "kind": "daily",
+            "time": "07:00"
           }
         ],
         "enabled": false
