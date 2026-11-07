@@ -112,10 +112,48 @@ description: <one-line, specific trigger description>
 auto_generated: true
 generated_at: <ISO timestamp>
 evidence_sessions: [<session_id>, ...]
+triage_bucket: private
+triage_reason: <one line — why this stays a private, tenant-specific learning>
 ---
 ```
 
+`triage_bucket` is one of `private` / `app:<app-slug>` / `workspace-doc` /
+`delete-candidate`. Default `private` — this run does not act on the
+classification, it only proposes one so the one-time triage pass (a
+separate card) doesn't have to re-derive it from scratch. Never write
+`app:<slug>` unless the knowledge would be true on a fresh install of that
+app in any workspace (no host ids, no container names, no card ids, no
+account emails specific to this tenant); when unsure, leave it `private`.
+
 Content: clear instructions for the agent — what to do, which tools to use, what to avoid. No vague prose. One concrete example minimum.
+
+### Publish to the aw-skills registry
+
+Immediately after writing (or updating) the file in the store, publish the
+same content to this workspace's own registry entry — the store write is
+the offline fallback, the registry is the copy every other consumer
+(AP-MT, other workspaces, the skills UI) actually reads:
+
+- **New skill:** `aw__skills__create_skill(name=<slug>, description=<frontmatter description>, content=<full SKILL.md text>, visibility='private')`.
+- **Updated skill:** `aw__skills__update_skill(name=<slug>, content=<full SKILL.md text>, message=<one line describing what changed>)`.
+
+On failure (a stale in-process MCP token intermittently 401s — a known,
+separately-tracked gap): retry once, then proceed. Do not block the run on
+it — the store write already stands, and the one-shot backfill script
+(`skills/aw-autoskill/backfill_skills_registry.py`, same repo as
+`compile_sessions.py`) is re-runnable as catch-up for anything that didn't
+make it to the registry this run. If the
+retry also 401s, fall back to a direct REST call with this workspace's own
+skills-app config token instead of the MCP path:
+
+```bash
+TOK=$(aw-workspace-cli apps skills --json | python3 -c "import json,sys;print(json.load(sys.stdin)['config']['identity_token'])")
+curl -sS -m 15 -X POST http://aw-skills:10016/api/skills \
+  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d "$(python3 -c 'import json,sys;print(json.dumps({"slug":sys.argv[1],"description":sys.argv[2],"content":open(sys.argv[3]).read(),"visibility":"private","tenant_slug":"aw","source":"mcp"}))' "<slug>" "<description>" "<path-to-SKILL.md>")"
+```
+
+(swap the POST for `PUT /api/skills/<slug>` with body `{"content":...,"message":...,"source":"mcp"}` when updating.) Never blind-retry a write into this service — it fronts a single-worker git push queue; one retry only, then move on.
 
 ### Updating an existing skill
 
@@ -126,7 +164,8 @@ with neither is native to the `aw-workspace` repo. Neither is yours to edit:
 note the gap in your report instead.
 
 Edit the SKILL.md to add the new knowledge. Add a `last_updated` field to the
-frontmatter and note what changed.
+frontmatter and note what changed. Then publish the update per the step
+above.
 
 ### Nothing to commit
 
@@ -221,7 +260,10 @@ print(json.dumps({"title": sys.argv[1], "text": sys.argv[2]}))
 ```
 
 `$YOUR_SUMMARY_TEXT` is 2-4 sentences: sessions analyzed, opportunities
-found, skills created/updated, or "nothing new since last run".
+found, skills created/updated, or "nothing new since last run" — plus one
+line on registry publishing: how many of this run's created/updated skills
+made it to the aw-skills registry vs. stayed store-only (and why, if any
+didn't).
 
 The call returns `{"ok": true, "sent": N}` on success, where `N` is how many
 sysadmin recipients got it. If `N` is 0, or the response includes a nonzero
