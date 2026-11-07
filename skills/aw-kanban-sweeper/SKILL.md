@@ -230,6 +230,18 @@ shape is exactly the trap that makes it useless for this, and
 ...}}` (`client.py:368-369`), so whatever you write is exactly what the next
 sweep's comparison gets.
 
+**Compute `<now>` fresh, immediately before *this* call, for *this* card —
+never once at the top of the run and reused for every card you touch.**
+`set_kanban_property` has no server-side notion of "now"; it writes exactly
+the string you hand it, so a single value reused across cards is purely an
+instruction-following failure, not a backend one. A shared batch-start
+timestamp defeats back-off outright: every card in the batch gets a stamp
+that predates its own closing comment by however long the batch took, so
+next sweep's check ("comment after `LastSweptAt`") trivially passes on all
+of them regardless of whether anything actually changed (Kanban
+4115bf3b-9510-812f-b755-da9ce5b65046 — 6 previously-swept cards found
+sharing one of only two timestamps across groups of 3).
+
 This pair covers every touch that leaves status unchanged — a successful
 resume, a fallback dispatch, or a "blocked, can't help" comment-only touch.
 If `set_kanban_property` fails after the comment already posted, report it
@@ -305,8 +317,9 @@ set_kanban_property(page_id, "LastSweptAt", <now>)
 ```
 
 Same ordering and format as Batch 1's stamp above — comment first, full
-ISO-8601 timestamp with the time component, fail-and-move-on if the stamp
-write errors.
+ISO-8601 timestamp with the time component, freshly computed immediately
+before this call (never Batch 1's value, never an earlier Batch 2 card's
+value), fail-and-move-on if the stamp write errors.
 
 ---
 
