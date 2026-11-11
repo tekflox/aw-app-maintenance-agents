@@ -35,9 +35,9 @@
         "description": "Analyzes recent Claude Code sessions in this workspace to discover skill-creation opportunities and automatically create or update aw-autoskill-<name> skills. Ships compile_sessions.py alongside it \u2014 the skill is useless without that script."
       },
       {
-        "id": "aw-kanban-sweeper",
-        "path": "skills/aw-kanban-sweeper/SKILL.md",
-        "description": "Daily sweep that closes out stale In Progress / Need Human Kanban cards \u2014 resumes the original agent session to ask whether the work is actually done, or routes a stale escalation to product-owner/architect. Never decides a verdict itself."
+        "id": "aw-manager",
+        "path": "skills/aw-manager/SKILL.md",
+        "description": "Dev-Team card-routing agent \u2014 fed by a named selector (Mode A, e.g. the daily stale-card sweep) or an explicit work-order list (Mode B) from any task/workflow/agent, it routes each card to the actor who can decide (coder, architect, product-owner, or a human) and manages devteam:* tag authority. Never decides a verdict itself."
       },
       {
         "id": "aw-shared-workflow-drift-checker",
@@ -127,23 +127,24 @@
           "color": "#0ea5a4"
         },
         {
-          "slug": "kanban-sweeper",
-          "name": "Kanban Sweeper",
-          "description": "Daily sweep of stale In Progress / Need Human Kanban cards \u2014 resumes the original agent's session to ask whether the work is actually done, or routes a stale escalation to product-owner/architect. Never decides a verdict itself; never fixes anything.",
-          "system_prompt_file": "prompts/kanban-sweeper.md",
+          "slug": "manager",
+          "name": "Manager",
+          "description": "The Dev Team's card-routing agent \u2014 fed by multiple tasks/workflows (not a sweep-only agent), it routes each card to the actor who can decide (coder, architect, product-owner, or a human) and moves/comments/creates Kanban cards accordingly. Never decides a verdict itself; never fixes anything.",
+          "system_prompt_file": "prompts/manager.md",
           "model_slug": "claude-runner-sonnet",
           "disable_harness_tools": true,
           "agent_config_slug": "maintenance-agents-config",
           "skill_slugs": [
-            "aw-kanban-sweeper"
+            "aw-manager"
           ],
-          "capabilities": "Finds Kanban cards stuck In Progress or Need Human for 12h+, checks whether the card's last run actually finished, and resumes that run's own session (or routes a stale escalation) to get it unstuck. Read-only with respect to code; never calls mark_flow_done on its own run.",
+          "capabilities": "Takes a named selector (e.g. the stale-card sweep) or an explicit work-order list, and for each card checks whether anything is still in flight, routes it to the named actor the routing matrix calls for (coder/architect/product-owner/human), and manages devteam:* tag authority. Read-only with respect to code; calls mark_flow_done only on a card-less run, never on a run that carries a Kanban card.",
           "use_cases": [
             "run the stale-card sweep",
             "why are these cards still In Progress",
-            "close out abandoned Kanban cards"
+            "close out abandoned Kanban cards",
+            "route this card to the right agent"
           ],
-          "hidden_from_flow": true,
+          "hidden_from_flow": false,
           "icon": "wind",
           "color": "#38bdf8"
         },
@@ -219,8 +220,8 @@
       {
         "name": "Kanban sweep \u2014 stale In Progress / Need Human",
         "type": "agent_prompt",
-        "agent_slug": "kanban-sweeper",
-        "prompt": "/aw-kanban-sweeper\n\nRun the stale-card sweep as defined in the aw-kanban-sweeper skill: Priority check first for cards whose flow already escalated to Need Human but never moved, then Batch 1 stale In Progress cards (run-check first, resume or fallback-dispatch), then Batch 2 Need Human complement if the Priority check and Batch 1 together didn't fill 5 slots (route to product-owner or architect by the latest comment). Comment on every card you touch. End with a plain-text report. Do not call mark_flow_done.",
+        "agent_slug": "manager",
+        "prompt": "/aw-manager\n\nselector: stale-sweep\n\nRun the stale-sweep selector as defined in the aw-manager skill: Priority check first for cards whose flow already escalated to Need Human but never moved, then Batch 1 stale In Progress cards (run-check first, resume or fallback-dispatch), then Batch 2 Need Human complement if the Priority check and Batch 1 together didn't fill 5 slots (route per the routing matrix). Comment on every card you touch. End with a plain-text report, then conclude the run with mark_flow_done(outcome='success', qa_not_needed=true, summary=<the report>) — this dispatch carries no Kanban card, so the call records only the run and moves nothing. Never call mark_flow_done on a run that carries a Kanban card.",
         "reuse_session": false,
         "schedules": [
           {
