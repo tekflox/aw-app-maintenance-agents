@@ -821,8 +821,14 @@ of a clean resolution, read the current `SweepBlock` (the same
 `get_kanban_properties` call already reading `LastSweptAt`/`Status` for
 that step costs nothing extra to extend) and:
 
-* **Same `wall_key` (+ same `<detail>` where one applies) as the stored
-  value** → increment the count, refresh the timestamp.
+* **Stored value already reads `<wall_key>|escalated|...` for this same
+  `wall_key` (+ `<detail>`)** → **no-op.** Do not re-increment (there is no
+  numeric count to increment — `escalated` replaced it) and do not re-run
+  the escalation actions below. The `escalated` marker stands until the
+  Update rule's own clean-touch/status-change branch clears it; a repeat
+  hit on an already-escalated wall changes nothing.
+* **Same `wall_key` (+ same `<detail>` where one applies) as a stored
+  *numeric* count** → increment the count, refresh the timestamp.
 * **Different `wall_key`, or no prior value, or a value that fails to
   parse** → overwrite with `count=1`.
 * **The touch resolves cleanly** — dispatch accepted and, for anything with
@@ -845,14 +851,22 @@ When an increment brings a `wall_key`'s count to **3**:
 
 **a) Always**, regardless of `wall_key`:
 
-1. `move_kanban_task(page_id, status="need_human", comment=...)` — the
-   comment must name the `wall_key`, the three attempt timestamps, every
-   run id involved, and (for `qa-dedup-409` specifically) the existing QA
-   run's id and its verdict. State explicitly: "escalated by the sweeper's
-   third rule after 3 identical refusals." If the move is rejected (the
-   hard-lock while `QAStatus="In Progress"` — see "Known edges" below),
-   fall back to `add_kanban_comment` with the same content and report the
-   rejected move; do not retry the move or skip the rest of this sequence.
+1. `move_kanban_task(page_id, status="need_human", comment=...)` — `SweepBlock`
+   itself only ever holds the *latest* occurrence (`<count>` and
+   `<last_attempt_iso8601>`, not a history of all three), so the comment
+   must name the `wall_key`, the count (3), and the latest attempt's
+   timestamp and `<detail>` read straight off the stored value before you
+   overwrite it — then point at this card's own `🧹 kanban-sweeper: ...`
+   comment history for the per-attempt run ids and timestamps, since every
+   prior touch already posted one of those (Batch 1/Batch 2's
+   `add_kanban_comment` step) — that thread, not `SweepBlock`, is where the
+   full 3-attempt history actually lives. For `qa-dedup-409` specifically,
+   also name the existing QA run's id and its verdict. State explicitly:
+   "escalated by the sweeper's third rule after 3 identical refusals." If
+   the move is rejected (the hard-lock while `QAStatus="In Progress"` — see
+   "Known edges" below), fall back to `add_kanban_comment` with the same
+   content and report the rejected move; do not retry the move or skip the
+   rest of this sequence.
 2. `ask_human(question=...)` with the same evidence, phrased as the
    concrete decision a human actually needs to make (not just "look at
    this card").
