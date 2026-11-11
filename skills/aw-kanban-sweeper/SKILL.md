@@ -1038,9 +1038,11 @@ End with a plain-text report, not a presentation and not `mark_flow_done`:
   includes `resume-ineffective` increments written at a wake-up, which are
   bookkeeping for a card picked on a *previous* pass, not this one.
 * Cards **escalated** by the SweepBlock third rule — the `wall_key`, the
-  three attempt timestamps, every run id cited, whether the `need_human`
-  move succeeded or fell back to comment-only, and whether a platform
-  finding card was filed or bumped (and its `finding_key` if so).
+  latest attempt's timestamp and `<detail>` (from `SweepBlock` itself),
+  every run id cited from the card's own comment history (**except
+  `no-work-run`, which has none to cite**), whether the `need_human` move
+  succeeded or fell back to comment-only, and whether a platform finding
+  card was filed or bumped (and its `finding_key` if so).
 
 Report what is true, not what is tidy — a skipped batch, a run check that
 failed to resolve, or a session still in flight all belong in the report
