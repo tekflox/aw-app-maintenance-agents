@@ -220,7 +220,7 @@
         "name": "Kanban sweep \u2014 stale In Progress / Need Human",
         "type": "agent_prompt",
         "agent_slug": "kanban-sweeper",
-        "prompt": "/aw-kanban-sweeper\n\nRun the stale-card sweep as defined in the aw-kanban-sweeper skill: Batch 1 stale In Progress cards (run-check first, resume or fallback-dispatch), Batch 2 Need Human complement if Batch 1 didn't fill 5 slots (route to product-owner or architect by the latest comment). Comment on every card you touch. End with a plain-text report. Do not call mark_flow_done.",
+        "prompt": "/aw-kanban-sweeper\n\nRun the stale-card sweep as defined in the aw-kanban-sweeper skill: Priority check first for cards whose flow already escalated to Need Human but never moved, then Batch 1 stale In Progress cards (run-check first, resume or fallback-dispatch), then Batch 2 Need Human complement if the Priority check and Batch 1 together didn't fill 5 slots (route to product-owner or architect by the latest comment). Comment on every card you touch. End with a plain-text report. Do not call mark_flow_done.",
         "reuse_session": false,
         "schedules": [
           {
