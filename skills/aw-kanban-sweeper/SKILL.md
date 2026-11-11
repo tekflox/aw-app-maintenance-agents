@@ -363,7 +363,10 @@ other move in this skill — one call, no separate `add_kanban_comment`.
 Then stamp `LastSweptAt` **inline, immediately** (not deferred): there is no
 dispatch here to wait on, so none of "Deferred stamp"'s reasoning for
 delaying the write applies — stamp it the same way the "blocked, can't
-help" comment-only case does.
+help" comment-only case does. Also clear `SweepBlock` inline in the same
+turn, per the Update rule's clean-touch branch (:888-893) — the `Status`
+change to `need_human` is exactly that branch's trigger, so a stale wall
+count from before this correction can't carry into a later recurrence.
 
 This check's picks count toward the same **fixed-5 total** as Batch 1/2 (see
 "Batch size" below) — it runs first and takes priority, but does not grant
