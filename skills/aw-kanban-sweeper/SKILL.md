@@ -403,8 +403,8 @@ For each candidate card, two lookups — a cheap liveness probe, then the
 pinned one:
 
 ```
-list_runs(notion_task_id=page_id, limit=1)                          # 1. liveness probe, unfiltered
-list_runs(notion_task_id=page_id, category="work", limit=1)         # 2. the pinned lookup
+list_runs(notion_task_id=page_id, limit=1)                           # 1. liveness probe, unfiltered
+list_runs(notion_task_id=page_id, category="work", limit=10)         # 2. the pinned lookup
 ```
 
 `list_runs` forwards both `notion_task_id` and `category` straight to AP-MT's
@@ -420,6 +420,22 @@ matching on the card itself are all dead ground — proved unreliable
 escalating this exact gap — so none of them gate the skip/qualify decision
 below.
 
+`category="work"` alone is not enough to land on the real deciding session:
+AP-MT's `run_agent_async` inherits the caller's `notion_task_id` onto every
+sub-dispatch, so a legitimately-dispatched `qa-*` review or a narrow helper
+is *also* `category="work"` and routinely becomes the newest row a `limit:1`
+lookup would have pinned. Call ② therefore reads up to 10 rows (not 1), and
+the qualifying run is **the newest row among them whose `source_slug` does
+NOT start with `qa-`** — the sweeper's "is this actually done?" question
+belongs to the agent that did the work, never to a QA reviewer, and resuming
+a `qa-*` session is also exactly what trips the server's QA-dedup 409 guard
+(`_check_qa_dispatch_dedup`,
+`repos/agents-platform-multitenant/backend/app/core/executor.py:3676`). If
+every row in the page is `qa-*`, fall back to the newest row as before (today's
+behavior) and let the third rule (`resilience:kanban-sweeper-third-rule-
+sweepblock-escalation`) count the resulting 409 instead of this check
+dodging it.
+
 **Deploy-order dependency.** `category` only has an effect once BOTH
 agents-platform-multitenant (the `Run.category` column + the `GET
 /api/runs?category=...` filter) and the MCP `list_runs` tool
@@ -430,6 +446,15 @@ this app is released/reinstalled before those two land, the sweeper is not
 worse off than it is today; it just isn't protected yet. Sequence
 deploys so those two ship first, then release this app — otherwise this
 section describes a protection that reads as live but silently isn't.
+
+The same dependency applies to passing `run_id` into `invoke_kanban_agent`
+below: until aw-app-agents-platform-runners ships that optional argument,
+`run_id` is an unknown arg to the tool — sequence this app's release
+**after** aw-app-agents-platform-runners's, not alongside or before it. Also
+note the `limit=10` window itself: on a card with more than 10 newer
+sub-dispatches since the real deciding session, that session falls outside
+the page and the qa-*-exclusion scan never sees it — **report that case, do
+not silently widen the limit** to work around it.
 
 1. **Liveness probe (unfiltered, call ①):** if the newest row for this card
    — of *any* category — has `status` `running` or `pending`, **skip, never
@@ -444,14 +469,16 @@ section describes a protection that reads as live but silently isn't.
    migration itself (a DDL-level `ALTER TABLE ... DEFAULT 'work'`, not an
    ORM-only default) — they never read as null/unset, so no older real
    dispatch is excluded here.
-   * **No row returned** → **skip, reason: "no dispatched run found."** A
+   * **No rows returned** → **skip, reason: "no dispatched run found."** A
      card whose only Run rows are monitor/wrapper dispatches correctly reads
      as having no dispatched work, not as resumable via the wrapper. Record
      this as wall `no-work-run` via the SweepBlock Update rule (see
      "SweepBlock — repeat-wall detection and escalation" below).
-   * **A row is returned** — it is, by construction, the single most recent
-     **real** (non-monitor) run dispatched against this card. Check its
-     `status`:
+   * **Rows returned** — walk them newest-first (`list_runs`' own ordering)
+     and take the first whose `source_slug` does not start with `qa-`; if
+     every row in the page is `qa-*`, take the newest row instead (the
+     fallback above). That row is the **qualifying run** for the rest of
+     this section. Check its `status`:
      * `success` or `error` → **terminal, qualifies.** Carry the row itself
        (`id`, `status`, `ended_at`, `source_slug`, `session_id`) into the
        next step — no separate `get_run` call needed.
@@ -469,7 +496,7 @@ nothing — that would reintroduce the exact unreliable path this replaces.
 ### Acting on a qualifying card
 
 ```
-invoke_kanban_agent(page_id, message="""
+invoke_kanban_agent(page_id, run_id=<id of the qualifying run from the run check>, message="""
 Your card <page_id> is still In Progress although your run finished
 <N>h ago. Re-read the card and your own final report. If the work you
 already did and reported is genuinely complete, call mark_flow_done with
@@ -480,6 +507,12 @@ move_kanban_task(need_human) with a comment. Do not redo or extend the
 work.
 """)
 ```
+
+`run_id` names the exact qualifying row the run check picked out — the newest
+non-`qa-*` row, not whatever `invoke_kanban_agent`'s own internal lookup
+would have picked without it. This is what actually lands the resume on the
+real deciding session instead of a `qa-*` review or a narrow sub-dispatch
+that happens to be newer.
 
 `<N>` = hours since that run's own finish time (the `ended_at` on the row the
 run check already carried forward), not since `last_edited_time`.
