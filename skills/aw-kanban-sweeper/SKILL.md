@@ -129,6 +129,15 @@ harder (drop more old entries) and retry **once**; if it still refuses,
 proceed to `finish_plan_iteration` anyway and say so in `notes` — a lost
 memory write must never cost the iteration close.
 
+**`value` must be the JSON object itself, never a JSON-encoded string.**
+Pass `value={"schema_version": 1, ...}` as a native object — if you build it
+as a string (e.g. `json.dumps(...)`) and pass THAT string as `value`, the
+server stores it verbatim, and `ext["kanban-sweeper"]` becomes a string
+instead of an object: a reader then has to parse it before reaching
+`.iterations[0]`, defeating the whole point of a structured ring. Confirmed
+live on iteration 10 (2026-11-11) — the written subtree was exactly this,
+a stringified blob, not a nested object.
+
 Then close the iteration as normal. This section changes nothing about how
 or when you call `finish_plan_iteration` itself — see the `plan-steward`
 agent's own contract for that; this is only about what you write before it.
