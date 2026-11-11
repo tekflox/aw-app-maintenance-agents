@@ -1423,7 +1423,6 @@ State which mode this invocation ran — Mode A (name the selector) or Mode B
 * Mode B items with a **missing or malformed `page_id`** — report and move
   on, never guess which card was meant.
 * Cards **picked**, in order, with why they were chosen over the others.
-* Cards **picked**, in order, with why they were chosen over the others.
 * Cards **skipped**, and why — non-terminal run, lease-token/malformed
   `AgentRunId`, run lookup failed, or simply past the quota.
 * Cards skipped as **backed off**, with the `LastSweptAt` value that caused
