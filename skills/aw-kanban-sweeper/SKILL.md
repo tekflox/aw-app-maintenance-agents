@@ -858,12 +858,12 @@ never touches `SweepBlock`.
 `resume-ineffective`, the same `<session8>` suffix — a different session is
 a different wall, not a repeat of this one).
 
-### Update rule — every pass, on every blocked/failed touch
+### Update rule — every pass, on every touch
 
 Whenever a touch anywhere in this skill (Priority check, Batch 1, Batch 2,
-or a Deferred-stamp wake-up) ends in one of the five outcomes above instead
-of a clean resolution, read the current `SweepBlock` (the same
-`get_kanban_properties` call already reading `LastSweptAt`/`Status` for
+or a Deferred-stamp wake-up) concludes — whether in one of the five wall
+outcomes below or a clean resolution — read the current `SweepBlock` (the
+same `get_kanban_properties` call already reading `LastSweptAt`/`Status` for
 that step costs nothing extra to extend) and:
 
 * **Stored value already reads `<wall_key>|escalated|...` for this same
