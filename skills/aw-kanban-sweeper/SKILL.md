@@ -19,11 +19,13 @@ Two rules that override anything you might infer on your own:
    (via `ask_human` / `move_kanban_task(need_human)`, which you only trigger
    on their behalf by resuming that agent — you do not call it yourself on a
    Batch 1 card). You read cards, pick candidates, and hand each one to the
-   party that can actually decide. Two narrow, explicitly-granted exceptions
-   to this — never a completeness verdict, see each section for why: "Not
-   needed" archiving (mootness on hard evidence) and the "Priority check"
-   (the flow itself already decided a human is needed; the sweeper is only
-   completing a move that decision already made but failed to apply).
+   party that can actually decide. Three narrow, explicitly-granted
+   exceptions to this — never a completeness verdict, see each section for
+   why: "Not needed" archiving (mootness on hard evidence), the "Priority
+   check" (the flow itself already decided a human is needed; the sweeper is
+   only completing a move that decision already made but failed to apply),
+   and the "SweepBlock" third rule (the sweeper judging its own repeated
+   inability to route the work, never the work itself).
 2. **A card whose run is not terminal is untouchable.** Running or pending
    means the work may still be happening. Resuming or re-dispatching into
    that is exactly the double-fire this board's claim mechanism exists to
@@ -76,7 +78,8 @@ ext["kanban-sweeper"] = {
     "skipped_active_run": "skipped: a non-terminal run is in flight",
     "skipped_quota": "candidate passed checks but the 5-card quota was full",
     "resume_failed": "invoke_kanban_agent failed, fell back to run_agent_async",
-    "blocked": "sweeper could not act, left for a human"
+    "blocked": "sweeper could not act, left for a human",
+    "escalated": "third rule fired: N identical refusals, moved to need_human + pinged a human"
   },
   "iterations": [
     {
@@ -443,7 +446,9 @@ section describes a protection that reads as live but silently isn't.
    dispatch is excluded here.
    * **No row returned** → **skip, reason: "no dispatched run found."** A
      card whose only Run rows are monitor/wrapper dispatches correctly reads
-     as having no dispatched work, not as resumable via the wrapper.
+     as having no dispatched work, not as resumable via the wrapper. Record
+     this as wall `no-work-run` via the SweepBlock Update rule (see
+     "SweepBlock — repeat-wall detection and escalation" below).
    * **A row is returned** — it is, by construction, the single most recent
      **real** (non-monitor) run dispatched against this card. Check its
      `status`:
@@ -504,6 +509,22 @@ run check already carried forward), not since `last_edited_time`.
   `peek_run_output` on the original run — enough for the fresh run to know
   what it already claimed to have done, not the full transcript. This
   response carries its own `run_id` too, keep it the same way.
+
+  If this fallback **also** fails, record wall `no-session` via the
+  SweepBlock Update rule below, comment what was tried, and move on — there
+  is no third dispatch path to try.
+* **`invoke_kanban_agent` returns the server's QA-dedup guard 409** (a QA
+  run already exists for this card; the guard also fires on a resume, not
+  only a fresh dispatch) → do **not** try the `run_agent_async` fallback,
+  it hits the identical guard — record wall `qa-dedup-409` via the
+  SweepBlock Update rule below and comment, same as today's existing
+  decline-and-comment behavior.
+* **`invoke_kanban_agent` or its fallback dies with the zero-token/no-LLM-
+  turn transport-failure signature** (see the
+  `aw-autoskill-kanban-sweeper-resume-transport-failures` skill for the
+  retry/fallback protocol) → once that protocol is exhausted with no
+  successful dispatch, record wall `resume-transport` via the SweepBlock
+  Update rule below and comment.
 
 Then, either way:
 
@@ -632,8 +653,28 @@ On each such wake-up:
    `status_at_touch` (the resumed/dispatched work moved it, e.g. to
    `"Done"` or `"Archived"`, or a Batch 2 card out of `"Need Human"`),
    the card already dropped out of the back-off's scope — **skip the
-   stamp entirely**, same reasoning as "Not needed" below.
-3. Otherwise, stamp now:
+   stamp entirely**, same reasoning as "Not needed" below. Also clear
+   `SweepBlock` here if it held a value for this card (per the Update rule
+   in "SweepBlock — repeat-wall detection and escalation" below) — a status
+   change means whatever it was tracking no longer applies.
+3. Otherwise, check whether this touch was actually **effective** before
+   stamping — this is the one SweepBlock wall that can only be known here,
+   never during the sweep pass itself. The wake-up already carries the
+   dispatched run's final `status` and `session_id`; for "a new reply
+   landed," read the card's comments (`get_kanban_card(page_id,
+   include_comments=true)`) and check whether the latest one postdates the
+   "🧹 kanban-sweeper: ..." comment you posted when you dispatched this
+   touch.
+   * **Terminal `error`, or terminal `success` with no new reply comment**
+     → record wall `resume-ineffective:<session8>` (`<session8>` = the
+     first 8 characters of the dispatched run's own `session_id`) via the
+     SweepBlock Update rule below.
+   * **Terminal `success` with a new reply comment** → a clean touch;
+     clear `SweepBlock` per the Update rule, if it held a value for this
+     card already.
+4. Regardless of step 3's outcome, stamp now — SweepBlock is a separate,
+   additional write, never a substitute for the `LastSweptAt` back-off
+   clock:
 
    ```
    set_kanban_property(page_id, "LastSweptAt", <now>)
@@ -709,12 +750,171 @@ avoid that.
 
 ---
 
+## SweepBlock — repeat-wall detection and escalation (third exception to Rule 1)
+
+The two rules at the top make the sweeper correctly refuse to force work
+through a wall it hits — but on their own they give it no way to notice "I
+have hit this *exact* wall on this *exact* card three sweeps running" and do
+anything but comment and move on, forever. This section is that mechanism:
+a dedicated Notion property tracking repeat walls per card, a closed
+vocabulary of what counts as a "wall," and a fixed escalation once a wall
+repeats three times. Like the "Priority check" above, this is the sweeper
+judging its own repeated inability to **route** the work — never a
+completeness verdict on the work itself, so it does not reopen Rule 1.
+
+### The property
+
+`SweepBlock` is a Notion `rich_text` property, sweeper-only writer, same
+precedent as `LastSweptAt` — a dedicated property, not comment-parsing
+(explicitly rejected by Frederico for the same reason `LastSweptAt` exists).
+One line:
+
+```
+<wall_key>|<count>|<last_attempt_iso8601>|<detail>
+```
+
+e.g. `qa-dedup-409|2|2026-11-10T04:05:17+00:00|run eae68794`. `<detail>` is
+free text giving the one piece of context that matters for that `wall_key`
+(a run id, a session-id prefix) — empty string if the wall_key carries none.
+Read/write it exactly like `LastSweptAt`: `get_kanban_properties(page_id,
+properties=["SweepBlock"])` to read, `set_kanban_property(page_id,
+"SweepBlock", <value>)` to write — `rich_text` already round-trips
+end-to-end (`repos/aw-app-notion/notion_app/kanban/client.py:359-360` write,
+`:377-378` read), no app change needed.
+
+**One-time provisioning, not automatic:** `SweepBlock` must exist as a
+`rich_text` property on the board's Notion database before any of this can
+do anything — the same manual one-time schema add `LastSweptAt` needed.
+Confirm it round-trips with `get_kanban_properties(page_id,
+properties=["SweepBlock"])` on a scratch card before relying on it; until
+that property exists, every write here fails and this whole section is a
+no-op.
+
+A `SweepBlock` value that fails to parse (wrong shape, unknown `wall_key`)
+is treated as **absent** — proceed as if this is the wall's first
+occurrence (count starts at 1). Never abort the card or the pass over a
+malformed stamp.
+
+### Wall taxonomy — closed vocabulary
+
+Exactly these five `wall_key` values. Nothing else is a "wall" for this
+mechanism — an ordinary skip (staleness, back-off, quota) is not a wall and
+never touches `SweepBlock`.
+
+| `wall_key` | Fires when |
+|---|---|
+| `qa-dedup-409` | `invoke_kanban_agent` (Batch 1, "Acting on a qualifying card") returns the server's QA-dedup guard 409 — a QA run already exists for this card, and the guard also fires on a resume, not only on a fresh dispatch. |
+| `no-work-run` | The run check's call ② (`list_runs(notion_task_id=page_id, category="work", limit=1)`, Batch 1) returns no row. |
+| `no-session` | `invoke_kanban_agent` fails explainably (most commonly: no `session_id` on the pinned run) **and** the `run_agent_async` fallback also fails. |
+| `resume-transport` | `invoke_kanban_agent` or its fallback dies with the zero-token/no-LLM-turn transport-failure signature (see the `aw-autoskill-kanban-sweeper-resume-transport-failures` skill) and the retry/fallback protocol there is exhausted with no successful dispatch. |
+| `resume-ineffective:<session8>` | At the deferred wake-up ("Deferred stamp" above), the dispatched run (resume, fallback, or a Batch 2 route) is terminal with `error`, or terminal with `success` but left no new comment on the card. `<detail>` = the first 8 characters of that run's own `session_id`. |
+
+"Identical wall" = same card **and** same `wall_key` (and, for
+`resume-ineffective`, the same `<session8>` suffix — a different session is
+a different wall, not a repeat of this one).
+
+### Update rule — every pass, on every blocked/failed touch
+
+Whenever a touch anywhere in this skill (Priority check, Batch 1, Batch 2,
+or a Deferred-stamp wake-up) ends in one of the five outcomes above instead
+of a clean resolution, read the current `SweepBlock` (the same
+`get_kanban_properties` call already reading `LastSweptAt`/`Status` for
+that step costs nothing extra to extend) and:
+
+* **Same `wall_key` (+ same `<detail>` where one applies) as the stored
+  value** → increment the count, refresh the timestamp.
+* **Different `wall_key`, or no prior value, or a value that fails to
+  parse** → overwrite with `count=1`.
+* **The touch resolves cleanly** — dispatch accepted and, for anything with
+  a registered callback, the wake-up sees a terminal `success` **with** a
+  new reply comment — **or** the card's `Status` changed since the last
+  stamp (same check "Deferred stamp" already does for `LastSweptAt`) →
+  **clear** `SweepBlock` (write empty string). A clean touch or a status
+  change both mean whatever this property was tracking no longer applies.
+
+`resume-ineffective` is the one wall that can only be known at the
+wake-up — it is written there, in the same turn as the deferred
+`LastSweptAt` stamp, never during the sweep pass itself (the sweep pass
+only knows the dispatch was *accepted*, not whether it was *effective*).
+Every other wall is known immediately, inline, during the sweep pass, and
+is written right alongside that step's existing comment.
+
+### The third rule — escalate at count = 3 (fixed, not configurable)
+
+When an increment brings a `wall_key`'s count to **3**:
+
+**a) Always**, regardless of `wall_key`:
+
+1. `move_kanban_task(page_id, status="need_human", comment=...)` — the
+   comment must name the `wall_key`, the three attempt timestamps, every
+   run id involved, and (for `qa-dedup-409` specifically) the existing QA
+   run's id and its verdict. State explicitly: "escalated by the sweeper's
+   third rule after 3 identical refusals." If the move is rejected (the
+   hard-lock while `QAStatus="In Progress"` — see "Known edges" below),
+   fall back to `add_kanban_comment` with the same content and report the
+   rejected move; do not retry the move or skip the rest of this sequence.
+2. `ask_human(question=...)` with the same evidence, phrased as the
+   concrete decision a human actually needs to make (not just "look at
+   this card").
+3. Write `SweepBlock` as `<wall_key>|escalated|<iso>|<detail>`. An
+   `escalated` marker never re-escalates on its own — it clears only via
+   the Update rule's status-change path above, same as any other value.
+
+**b) Additionally**, only for platform-shaped walls — a bug in the platform
+itself, not something only Frederico can decide — file or bump a dedup'd
+finding card via `create_kanban_task` (dedup by `finding_key` gives
+platform-wide occurrence counting for free):
+
+| `wall_key` | `finding_key` | `agent_slug` |
+|---|---|---|
+| `resume-transport` | `reliability:invoke-kanban-agent-resume-transport` | `debugger` |
+| `resume-ineffective` where the resumed run's `source_slug` ≠ the card's own `AgentSlug` | `reliability:invoke-kanban-agent-wrong-session` | `debugger` |
+| `qa-dedup-409` (only if still hit after the sibling run-id-selector card ships) | `reliability:kanban-sweeper-qa-dedup-wall` | `debugger` |
+
+`no-work-run` and `no-session` get **no** finding card — these are human
+triage calls (a genuinely missing dispatch, or a genuinely sessionless run),
+not a platform-defect pattern a debugger can act on from a finding card
+alone.
+
+This is the **third** narrow, explicitly-granted exception to Rule 1 (see
+"Priority check" above for the second, and "Not needed" for the first): the
+sweeper is not judging whether the work is complete, it is judging its own
+repeated inability to *route* that work to whoever can decide — squarely
+its own lane, same reasoning as the Priority check.
+
+**Known edges:**
+
+* The `need_human` move is hard-locked while the card's `QAStatus` is "In
+  Progress" (the AP-MT move API) — on rejection, fall back to comment +
+  `ask_human` only, still stamp `escalated`, and report the rejected move
+  explicitly.
+* If `ask_human` fails on a scheduled (`agent_run`-initiated) session, fall
+  back to comment-only and report it; do not touch any verdict already
+  written.
+* A deliberately long-running epic whose resumed session replies "keep In
+  Progress" is a **clean** touch — the wake-up sees a new reply comment, so
+  it clears `SweepBlock`, never escalates. (This is exactly the 40b5bf3b
+  epic's shape — see "Deferred stamp" above.)
+* The ~1h `register_callback` ceiling means some wake-ups never arrive; a
+  missed wake-up just delays `resume-ineffective` counting for that one
+  card — the safe direction, not a correctness gap.
+
+Escalation picks still count toward the fixed-5 budget like everything else
+— see "Batch size" below; the third rule spends no extra budget of its own,
+it only changes what happens to a card already picked this pass (or, for
+`resume-ineffective`, already picked on a *previous* pass and now being
+closed out at its wake-up).
+
+---
+
 ## Batch size
 
 **Fixed at 5 total** (Priority check + Batch 1 + Batch 2 combined). Not
 configurable, not a default — do not read it from anywhere else or let it
 drift with board size. The Priority check runs first and takes from this
-same budget; it does not add to it.
+same budget; it does not add to it. Escalation picks (the SweepBlock third
+rule above) count toward this same budget like everything else — they do
+not add to it either.
 
 ---
 
@@ -746,6 +946,14 @@ End with a plain-text report, not a presentation and not `mark_flow_done`:
   card's Status before the correcting move. If the scan window
   (`list_runs(limit=300)`) came back saturated, say so — that's the signal
   it may be missing older escalations, not proof there are none.
+* Every **SweepBlock increment** this pass, whether or not that card was
+  otherwise picked — `"wall qa-dedup-409 now 2/3 on card <page_id>"` — this
+  includes `resume-ineffective` increments written at a wake-up, which are
+  bookkeeping for a card picked on a *previous* pass, not this one.
+* Cards **escalated** by the SweepBlock third rule — the `wall_key`, the
+  three attempt timestamps, every run id cited, whether the `need_human`
+  move succeeded or fell back to comment-only, and whether a platform
+  finding card was filed or bumped (and its `finding_key` if so).
 
 Report what is true, not what is tidy — a skipped batch, a run check that
 failed to resolve, or a session still in flight all belong in the report
