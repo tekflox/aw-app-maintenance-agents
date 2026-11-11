@@ -184,6 +184,57 @@ grep -rln "httpx\|requests" /opt/aw-workspace/src/ /opt/aw-workspace/repos/aw-ap
 "health" checks confirmed a file or binary was present and reported green
 while the thing was entirely broken. Look for it specifically.
 
+### Audit 3b — Host systemd units on the bare metal
+
+`doctor` runs *inside* a workspace container and cannot see the host's
+netfilter or its systemd units, so Audit 1 is blind to a whole class of
+failure that lives one layer below it. These four units are the ones that
+guard production netfilter on the shared bare metal, and each has already
+failed silently at least once.
+
+Via the remote-host MCP tools, on host `bare-metal-privileged`:
+
+```
+remote_host_exec_run({
+  "host_id": "bare-metal-privileged",
+  "command": "systemctl is-failed aw-podman.service aw-podman-check.service aw-firewall.service; echo ---; systemctl is-active aw-podman-check.timer"
+})
+```
+
+`is-failed` prints one line per unit in order, so read them positionally.
+It exits non-zero when a unit is *not* failed, so judge the output, not the
+exit code.
+
+| Flag | Criterion |
+|---|---|
+| `host:unit-failed` | Any of the three services prints `failed` |
+| `host:monitor-dead` | `aw-podman-check.timer` is anything but `active` |
+
+**Both are P1,** and the second as firmly as the first. A dead timer is the
+same silent-failure class as the leak it watches for: nothing fails, nothing
+logs, and the absence of alarms reads as health. Do not downgrade it because
+"nothing is currently broken" — the point is that you would no longer know.
+
+Two measured precedents, both from this card
+(`infra:podman-rootful-on-bare-metal-alongside-docker`), to calibrate how
+quiet this gets:
+
+* `aw-podman.service` sat `failed` for **20 days** (2026-10-21 → 2026-11-11)
+  with `status=203/EXEC` — systemd could not execute its own `ExecStart`,
+  because a `git reset --hard` restored the script's tracked 644 mode. No
+  alert, no log anyone read.
+* While that unit could not run, its check could not run either, which
+  masked a second bug: the detector was reporting every **live** netavark
+  rule as leaked, and `--fix` would have deleted a running tenant's NAT.
+
+Context for the card you open: `aw-podman-check.service` is deliberately
+`Type=oneshot` with no `RemainAfterExit`, so its state is replaced every 15
+minutes — if it reads `failed`, the condition is *current*, not historical.
+`aw-podman.service` is the opposite (`RemainAfterExit=yes`), so its `failed`
+may be stale; `journalctl -u aw-podman` dates it. Both live in
+`aw-stack/tools/host-podman/` (with their README), **not** in the retired
+`agentic-workspace`, where `tools/host-firewall/` still lives.
+
 ### Audit 4 — Agent-run failures
 
 The runs going through Agents Platform are the workspace's real workload.
