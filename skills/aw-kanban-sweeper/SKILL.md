@@ -78,6 +78,7 @@ ext["kanban-sweeper"] = {
     "skipped_active_run": "skipped: a non-terminal run is in flight",
     "skipped_quota": "candidate passed checks but the 5-card quota was full",
     "resume_failed": "invoke_kanban_agent failed, fell back to run_agent_async",
+    "wall_recorded": "non-interpretable wall (no-work-run/no-session/resume-transport): comment+stamp only, no actor chosen yet, N=3 backstop pending",
     "escalated": "third rule fired: N identical refusals, moved to need_human + pinged a human"
   },
   "iterations": [
@@ -677,16 +678,18 @@ run check already carried forward), not since `last_edited_time`.
 * **`invoke_kanban_agent` returns the server's QA-dedup guard 409** (a QA
   run already exists for this card; the guard also fires on a resume, not
   only a fresh dispatch) → do **not** try the `run_agent_async` fallback,
-  it hits the identical guard. This is an **interpretable** wall — route it
+  it hits the identical guard. This is an **interpretable** wall — record
+  wall `qa-dedup-409` via the SweepBlock Update rule below **first**: if
+  this hit brings the count to 3, the Update rule's own third-rule
+  escalation is this touch's entire action (per "Order matters here" in
+  "Routing matrix" above) — stop, do not also route. Otherwise, route it
   immediately per "Routing matrix" above: read the existing QA run's
   verdict (the `QAStatus` property, or the QA run's own result). Approved →
   destination 4 (🙋 Sent to Need Human — no dispatch, comment and stamp
   `LastSweptAt` inline, same as the no-dispatch case below). Failed →
   destination 1 (➡️ Dispatching back to coder — a real dispatch, follow
   "Then, either way" below: comment + `register_callback`, `LastSweptAt`
-  deferred). Either way, record wall `qa-dedup-409` via the SweepBlock
-  Update rule below — the count now tracks routing attempts, and the N=3
-  backstop still fires if this exact wall keeps recurring despite routing.
+  deferred).
 * **`invoke_kanban_agent` or its fallback dies with the zero-token/no-LLM-
   turn transport-failure signature** (see the
   `aw-autoskill-kanban-sweeper-resume-transport-failures` skill for the
@@ -864,13 +867,17 @@ On each such wake-up:
    * **Terminal `error`, or terminal `success` with no new reply comment**
      → record wall `resume-ineffective:<session8>` (`<session8>` = the
      first 8 characters of the dispatched run's own `session_id`) via the
-     SweepBlock Update rule below. This is an **interpretable** wall —
-     route it immediately per "Routing matrix" above, using the signals
-     available right here (the dispatched run's own status/`source_slug`,
-     the `QAStatus` property, the card's latest comments), and post the
-     `🧹` comment naming the action taken. Destinations 1-3 dispatch a new
-     run — see step 4 below for how that defers the stamp again.
-     Destination 4 pings `ask_human`, attempts the `need_human` move, and
+     SweepBlock Update rule below **first**: if this hit brings the count
+     to 3, the Update rule's own third-rule escalation is this touch's
+     entire action (per "Order matters here" in "Routing matrix" above) —
+     stop, do not also route. This is an **interpretable** wall, so
+     otherwise route it immediately per "Routing matrix" above, using the
+     signals available right here (the dispatched run's own
+     status/`source_slug`, the `QAStatus` property, the card's latest
+     comments), and post the `🧹` comment naming the action taken.
+     Destinations 1-3 dispatch a new run — see step 4 below for how that
+     defers the stamp again. Destination 4 pings `ask_human`, attempts the
+     `need_human` move, and
      writes the `routed-human` SweepBlock marker, same as the matrix
      section describes — no dispatch, so the stamp in step 4 applies
      inline this same turn.
