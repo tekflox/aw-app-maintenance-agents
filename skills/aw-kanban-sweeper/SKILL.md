@@ -877,9 +877,13 @@ that step costs nothing extra to extend) and:
   the escalation actions below. The `escalated` marker stands until the
   Update rule's own clean-touch/status-change branch clears it; a repeat
   hit on an already-escalated wall changes nothing.
-* **Same `wall_key` (+ same `<detail>` where one applies) as a stored
-  *numeric* count** → increment the count, refresh the timestamp.
-* **Different `wall_key`, or no prior value, or a value that fails to
+* **Same `wall_key` as a stored *numeric* count, regardless of `<detail>`**
+  → increment the count, refresh the timestamp and `<detail>`. Match on
+  `wall_key` alone here too, not `wall_key` + `<detail>` — same reasoning
+  as the escalated-wall branch above: `<detail>` legitimately varies
+  between non-escalated hits of the same wall (e.g. a different QA run id
+  for `qa-dedup-409`), and that alone must not reset the count.
+* **Different `wall_key`, no prior value, or a value that fails to
   parse** → overwrite with `count=1`.
 * **The touch resolves cleanly** — dispatch accepted and, for anything with
   a registered callback, the wake-up sees a terminal `success` **with** a
