@@ -35,9 +35,45 @@ Two rules that override anything you might infer on your own:
    that is exactly the double-fire this board's claim mechanism exists to
    prevent elsewhere — skip it, every time, no exception.
 
-Not run in a flow when the scheduler fires it — **do not call
-`mark_flow_done`** on your own run or on any card you touch. End with a
-plain-text report instead.
+Flow membership changes how a turn must end — see "Flow membership: the
+injected aw-agents-flow contract" below for the rule that replaces the old
+blanket "never call `mark_flow_done`."
+
+---
+
+## Flow membership: the injected aw-agents-flow contract
+
+Manager is a node in the enabled `software-engineering` Agents Flow. That
+makes every dispatch of it — both modes, every feeder, including the
+04:00 scheduled Mode A sweep — receive the injected `aw-agents-flow` skill
+and its "end the turn with a terminal action" contract, plus the
+platform's reprompt-then-escalate safety net for a turn that ends without
+one. This is platform behavior keyed on agent identity — per-agent
+membership, not per-dispatch (`agents-platform-multitenant`
+`core/executor.py:952` docstring :963-965, injection :2448-2460) — not
+something the Manager opts into or out of; it must satisfy the contract
+rather than ignore it.
+
+The rule, replacing the old blanket "never call `mark_flow_done`":
+
+* **Card-less turn** — this run's own `NOTION_TASK_ID` is empty (the
+  scheduled Mode A sweep, or any card-less feeder dispatch): end the turn
+  by calling `mark_flow_done(outcome="success", qa_not_needed=true,
+  summary=<the plain-text report>)` (`outcome="partial"` if the sweep was
+  cut short). On a card-less run this records only the run's own
+  conclusion and moves no Kanban card (`core/wakeups.py:1021-1022` returns
+  before any Kanban move when `notion_task_id` is null), so Rule 1 above
+  — the Manager never decides card completion — is untouched. Always pass
+  `qa_not_needed=true` explicitly: omitting it lets the backend auto-fish
+  for a `qa-*` run by target, which can reject or mis-attribute on a
+  Manager run.
+* **Card-bearing turn** — this run carries a Kanban card: **never** call
+  `mark_flow_done` (it would move that card to `done`/`need_human`). End
+  with `return_to_caller_agent(kind="result")` when there is a caller, or
+  a handoff.
+* This applies to **every** turn of the session, including wakeup/callback
+  resume turns — each turn is its own Run row and needs its own terminal
+  action.
 
 ---
 
@@ -1324,6 +1360,12 @@ Manager the list directly, skipping straight to the "Per-card pipeline"
 above. Either way, the Manager's own behavior — run-check, routing matrix,
 touch discipline, the fixed-5 budget, "What to report" below — is the same
 contract regardless of which feeder dispatched it.
+
+A feeder that binds a card to its dispatch (passes `notion_task_id`)
+SHOULD also pass `call_me_back=true` — the platform then skips the
+safety-net reprompt entirely (`core/executor.py:1452`), and the Manager's
+result is delivered back to the feeder automatically instead of needing a
+separate wake-up.
 
 ---
 

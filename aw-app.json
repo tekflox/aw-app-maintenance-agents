@@ -137,7 +137,7 @@
           "skill_slugs": [
             "aw-manager"
           ],
-          "capabilities": "Takes a named selector (e.g. the stale-card sweep) or an explicit work-order list, and for each card checks whether anything is still in flight, routes it to the named actor the routing matrix calls for (coder/architect/product-owner/human), and manages devteam:* tag authority. Read-only with respect to code; never calls mark_flow_done on its own run.",
+          "capabilities": "Takes a named selector (e.g. the stale-card sweep) or an explicit work-order list, and for each card checks whether anything is still in flight, routes it to the named actor the routing matrix calls for (coder/architect/product-owner/human), and manages devteam:* tag authority. Read-only with respect to code; calls mark_flow_done only on a card-less run, never on a run that carries a Kanban card.",
           "use_cases": [
             "run the stale-card sweep",
             "why are these cards still In Progress",
@@ -221,7 +221,7 @@
         "name": "Kanban sweep \u2014 stale In Progress / Need Human",
         "type": "agent_prompt",
         "agent_slug": "manager",
-        "prompt": "/aw-manager\n\nselector: stale-sweep\n\nRun the stale-sweep selector as defined in the aw-manager skill: Priority check first for cards whose flow already escalated to Need Human but never moved, then Batch 1 stale In Progress cards (run-check first, resume or fallback-dispatch), then Batch 2 Need Human complement if the Priority check and Batch 1 together didn't fill 5 slots (route per the routing matrix). Comment on every card you touch. End with a plain-text report. Do not call mark_flow_done.",
+        "prompt": "/aw-manager\n\nselector: stale-sweep\n\nRun the stale-sweep selector as defined in the aw-manager skill: Priority check first for cards whose flow already escalated to Need Human but never moved, then Batch 1 stale In Progress cards (run-check first, resume or fallback-dispatch), then Batch 2 Need Human complement if the Priority check and Batch 1 together didn't fill 5 slots (route per the routing matrix). Comment on every card you touch. End with a plain-text report, then conclude the run with mark_flow_done(outcome='success', qa_not_needed=true, summary=<the report>) — this dispatch carries no Kanban card, so the call records only the run and moves nothing. Never call mark_flow_done on a run that carries a Kanban card.",
         "reuse_session": false,
         "schedules": [
           {
