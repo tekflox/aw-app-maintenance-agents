@@ -31,6 +31,119 @@ plain-text report instead.
 
 ---
 
+## Plan memory — read first, write last
+
+**Gate: only applies when this run is a Plan iteration.** The cadence-driven
+"Kanban Sweep" Plan dispatches you with an input that starts
+`# Plan iteration <seq> — ...` and carries a line reading
+`` Plan iteration id: `<id>` `` (`agents-platform-multitenant`
+`backend/app/core/plans.py:538-542`). The legacy standalone scheduled task
+(`aw-app.json`'s "Kanban sweep — stale In Progress / Need Human") has no
+plan at all and never produces that heading. If your input doesn't start
+that way, **skip this whole section** — do not call `get_plan_memory` or
+`update_plan_memory`, there is no iteration for them to attach to and a
+write from this path would silently skew the ring for every reader.
+
+**READ, once, before Batch 1:**
+
+```
+get_plan_memory("kanban-sweep")
+```
+
+Pull `ext["kanban-sweeper"].carry` and the full `iterations` ring (bounded
+to 10 entries, newest first) — carry-forward notes and recent passes' card
+lists feed candidate ordering alongside `LastSweptAt`. `LastSweptAt` stays
+the authoritative per-card back-off; memory only supplements it, it never
+replaces it or overrides a back-off skip.
+
+**The schema — this is the one file that owns the sweeper's concrete
+vocabulary** (the generic `plan-steward` prompt deliberately only teaches
+the abstract shape; see `agents-platform-multitenant` `seed.py:176`):
+
+```json
+ext["kanban-sweeper"] = {
+  "schema_version": 1,
+  "outcome_legend": {
+    "moved_done": "card moved to Done",
+    "archived_not_needed": "card archived as moot, not completeness",
+    "resumed": "original session resumed via invoke_kanban_agent",
+    "routed": "escalated to product-owner/architect (see item.to)",
+    "backed_off": "skipped: LastSweptAt back-off still in effect",
+    "skipped_active_run": "skipped: a non-terminal run is in flight",
+    "skipped_quota": "candidate passed checks but the 5-card quota was full",
+    "resume_failed": "invoke_kanban_agent failed, fell back to run_agent_async",
+    "blocked": "sweeper could not act, left for a human"
+  },
+  "iterations": [
+    {
+      "seq": 9,
+      "iteration_id": "<Plan iteration id from the prompt>",
+      "run_id": "<this run's own AW_RUN_ID>",
+      "finished_at": "2026-11-10T23:40:00+00:00",
+      "decision": "pushed",
+      "counts": {"moved_done": 2, "routed": 3},
+      "items": [
+        {"id": "<notion page_id>", "title": "<=60 chars", "outcome": "moved_done"},
+        {"id": "<notion page_id>", "title": "<=60 chars", "outcome": "routed",
+         "to": "architect", "note": "optional, short"}
+      ]
+    }
+  ],
+  "carry": {
+    "<notion page_id>": {"note": "short reminder for next pass", "expires": "2026-11-15"}
+  }
+}
+```
+
+`outcome_legend` exists so an agent that has never read this skill can
+still make sense of the ring from `get_plan_memory` alone — keep it in sync
+if you ever add or rename an outcome value. `counts` and `items` are
+optional per the generic envelope, but the sweeper always writes them: they
+are exactly what answers "which cards moved to Done this iteration" without
+parsing prose. `iterations` is newest-first. `PlanIteration.notes` stays the
+free-text narrative, unchanged — this ring is the queryable counterpart; do
+not dump this JSON into `notes`, and do not drop the narrative either.
+
+**WRITE, once, immediately before `finish_plan_iteration`:**
+
+Build this iteration's entry from the Plan-iteration-prompt fields
+(`seq`, `iteration_id`) plus your own run id and what you actually did this
+pass, prepend it to the `iterations` you read, keep the `carry` map current
+(drop entries past their `expires`), then:
+
+```
+update_plan_memory(slug="kanban-sweep", writer_key="kanban-sweeper",
+                    value=<the whole subtree above, with your new entry prepended>,
+                    summary="<1-3 line rolling gist of the last pass>")
+```
+
+`value` REPLACES your whole subtree — this is why you read it first. Keep
+at most 10 entries in `iterations`, and drop the oldest ones while the
+encoded subtree exceeds roughly 16 KiB (the 64 KiB cap is shared with every
+other writer on this document); trim `title` to 60 chars. On a 413, trim
+harder (drop more old entries) and retry **once**; if it still refuses,
+proceed to `finish_plan_iteration` anyway and say so in `notes` — a lost
+memory write must never cost the iteration close.
+
+Then close the iteration as normal. This section changes nothing about how
+or when you call `finish_plan_iteration` itself — see the `plan-steward`
+agent's own contract for that; this is only about what you write before it.
+
+**Known, accepted race:** `update_plan_memory` replaces the whole subtree
+you read, with no version check on your own `writer_key`. Only one Plan
+iteration is normally open on "kanban-sweep" at a time (the cadence claim),
+so this only bites if a prior iteration's session is still alive and writes
+late after the watchdog already timed it out and freed the claim for a new
+one — a late write from a dead-but-not-yet-stopped session landing after
+the new iteration's write. Writing promptly, right before closing, is the
+only mitigation this skill gives you; there is no server-side fence (same
+risk the Architect named rather than a new one), and memory is supplementary
+to `LastSweptAt`, never authoritative, so a lost or overwritten entry here
+degrades the "what did the last run do" answer, not the sweep's own
+correctness.
+
+---
+
 ## Why last_edited_time, not "entered this status at"
 
 There is no Kanban property recording when a card entered its current
