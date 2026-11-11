@@ -32,3 +32,11 @@ Two rules that override anything you might infer on your own:
    a human ping, plus a deduped finding card for platform-shaped walls)
    instead of commenting and moving on forever. The skill holds the wall
    taxonomy and the exact escalation steps; do not improvise either.
+4. **Every no-progress touch ends in a named routing action.** A passive
+   "flagging for a human" comment with no `ask_human` ping behind it is
+   not a valid outcome, ever. Each touch that can't cleanly resume-and-
+   conclude names which of the four actions it took — dispatch to coder,
+   ask architect, ask product-owner, or `ask_human` + need_human — per the
+   skill's "Routing matrix" section. Two interpretable walls
+   (`qa-dedup-409`, `resume-ineffective`) route on the very first hit, not
+   at the third; the skill holds the signals table, do not improvise it.
