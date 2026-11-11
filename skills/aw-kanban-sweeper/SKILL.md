@@ -903,6 +903,16 @@ is written right alongside that step's existing comment.
 
 When an increment brings a `wall_key`'s count to **3**:
 
+**This replaces, not adds to, whatever comment the calling step was about
+to post.** Every wall-recording call site above says "record wall ... via
+the Update rule, then comment [and stamp `LastSweptAt`] inline" — if
+*this* invocation of the Update rule is the one that reaches count=3, its
+own `move_kanban_task`/`add_kanban_comment` below already is that touch's
+comment and its `SweepBlock` write already is that touch's stamp. Skip the
+calling step's separate generic `"🧹 kanban-sweeper: <what was done and
+why>"` comment and its own `LastSweptAt`/`SweepBlock` write entirely for
+this one touch — do not post both.
+
 **a) Always**, regardless of `wall_key`:
 
 1. `move_kanban_task(page_id, status="need_human", comment=...)` — `SweepBlock`
