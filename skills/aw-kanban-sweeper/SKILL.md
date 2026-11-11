@@ -199,6 +199,20 @@ candidate here exactly as Batch 1/2 do, and skip on failure with the same
 reopen the staleness gate this section exists to bypass — `last_edited_time`
 is never consulted here, only `LastSweptAt` + the comment-since check.
 
+**Cap to the fixed-5 budget before acting on anything.** Steps 1-4 plus the
+back-off filter can surface more survivors than the budget has room for —
+plausible precisely in the outage scenario this check exists to backstop,
+where many cards fail to move at once. Sort survivors **oldest-run-first**
+by the qualifying row's own `ended_at` (the longest-stuck escalation is the
+most urgent one) and take **at most 5**. If more than 5 survive, the rest
+are **not** touched this pass — report the overflow count explicitly (they
+remain eligible candidates on the very next pass, back-off permitting; this
+is a deferral, not a drop). This is the same invariant "Batch size" states
+for the sweep as a whole — this check does not get to spend more than the
+whole pass's budget on its own, even though it skips the staleness gate.
+Whatever it takes from the 5 is what's left for Batch 1/2, per "Batch size"
+below.
+
 **Acting on a qualifying card — a second narrow, explicitly-granted
 exception to Rule 1** (the first is "Not needed" archiving, below): the
 flow itself already made the completeness/correctness call here
