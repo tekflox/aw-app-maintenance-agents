@@ -19,7 +19,11 @@ Two rules that override anything you might infer on your own:
    (via `ask_human` / `move_kanban_task(need_human)`, which you only trigger
    on their behalf by resuming that agent — you do not call it yourself on a
    Batch 1 card). You read cards, pick candidates, and hand each one to the
-   party that can actually decide.
+   party that can actually decide. Two narrow, explicitly-granted exceptions
+   to this — never a completeness verdict, see each section for why: "Not
+   needed" archiving (mootness on hard evidence) and the "Priority check"
+   (the flow itself already decided a human is needed; the sweeper is only
+   completing a move that decision already made but failed to apply).
 2. **A card whose run is not terminal is untouchable.** Running or pending
    means the work may still be happening. Resuming or re-dispatching into
    that is exactly the double-fire this board's claim mechanism exists to
@@ -132,6 +136,103 @@ threads see the `aw-autoskill-huge-kanban-card-comments` skill.
 
 ---
 
+## Priority check — escalation that never moved the card
+
+A card whose most-recently-dispatched run set `flow_needs_human=true` (a
+durable column on the `Run` row — `core/executor.py::_escalate_need_human`
+sets it on every run sharing that run's `flow_run_id` once a flow exhausts
+its reprompt and escalates) but whose own Kanban `Status` never actually
+reached `"Need Human"` is a **correctness signal, not a staleness one**: the
+flow already decided a human is needed, and only the mechanical move failed
+(the exact failure class Kanban 4155bf3b-9510-8198-9c1f-f86163100b01 fixed on
+the AP-MT side — this check is the backstop for if that path, or some future
+equivalent of it, ever breaks the same way again). Run this **before** Batch
+1 and Batch 2, every pass, **regardless of any card's `last_edited_time` or
+`LastSweptAt`** — a card stuck on a failed escalation could be minutes old
+and still needs this now, not at the next 12h-stale pass.
+
+`list_runs` has no server-side filter for `flow_needs_human` — checked the
+MCP tool's actual param list (`category`, `limit`, `notion_task_id`,
+`session_id`, `status`; no flag for this) rather than assuming it existed.
+The field itself IS present on every row the tool already returns (AP-MT's
+`RunOut` schema serialises the whole `Run` row), so this is a client-side
+scan over an existing call, not a schema change anywhere:
+
+```
+list_runs(limit=300)
+```
+
+Unfiltered, global, newest-first (`list_runs`' own ordering). Walk it once:
+
+1. Keep the **first row seen per distinct `notion_task_id`** — recency order
+   means that is each card's most-recently-dispatched run; a card's older
+   runs under it are irrelevant here.
+2. From those, keep only rows with `flow_needs_human == true`.
+3. From those, keep only rows whose own `status` is terminal
+   (`success`/`error`) — same reasoning as Batch 1's run check: a run still
+   `running`/`pending` may yet take a terminal flow action on its own before
+   anyone needs to intervene, so don't race it.
+4. For each survivor, `get_kanban_properties(page_id, properties=["Status"])`.
+   Skip if it already reads `"Need Human"` (nothing to fix) or `"Done"` /
+   `"Archived"` (superseded by later legitimate action — flagging it now
+   would be noise, not a catch). Anything else qualifies.
+
+**Known, stated limitation, not a silent cap:** this only sees a card's
+escalation if it falls within the newest 300 runs platform-wide. A card
+whose escalated run has scrolled past that window will not be
+rediscovered by this check (though it remains reachable by Batch 1/2 if it's
+also stale by the normal rule). Report this explicitly if the scan looks
+saturated (300 rows returned and the oldest is recent) — that is the signal
+the window may be too narrow for current traffic, raise it rather than
+silently widening or narrowing `limit` on your own.
+
+**Back-off — applies here too, deliberately, once a card has been picked by
+this check at least once.** Frederico left this as a judgment call rather
+than a fixed rule: the *first* time a card qualifies, skip the 12h/
+`LastSweptAt` gate entirely, per above — but if the sweeper already
+corrected this exact card's move on a prior pass and a human still hasn't
+acted on it, re-touching it every single day is pure noise with no new
+information (the flow's own decision hasn't changed, only the elapsed time
+has). So: run the ordinary **Back-off — LastSweptAt** check (see above) on a
+candidate here exactly as Batch 1/2 do, and skip on failure with the same
+`"backed off: last swept <ts>, no comment since"` reason. This does not
+reopen the staleness gate this section exists to bypass — `last_edited_time`
+is never consulted here, only `LastSweptAt` + the comment-since check.
+
+**Acting on a qualifying card — a second narrow, explicitly-granted
+exception to Rule 1** (the first is "Not needed" archiving, below): the
+flow itself already made the completeness/correctness call here
+(`flow_needs_human=true` is that decision, already recorded) — the sweeper
+is not deciding anything new, only finishing a move the flow tried and
+failed to make. Unlike Batch 1/2, there is no session worth resuming: the
+run that escalated already ended, and re-asking it "is this done?" makes no
+sense when it has already answered "a human needs to look at this." So move
+the card directly:
+
+```
+move_kanban_task(
+  page_id,
+  status="need_human",
+  comment=f"🧹 kanban-sweeper: Agents Flow escalated this to Need Human "
+          f"(run {run.id}, agent {run.source_slug}) but the card never "
+          f"moved — correcting it now. See the run for the original reason."
+)
+```
+
+`move_kanban_task` posts the comment before the status patch, same as every
+other move in this skill — one call, no separate `add_kanban_comment`.
+Then stamp `LastSweptAt` **inline, immediately** (not deferred): there is no
+dispatch here to wait on, so none of "Deferred stamp"'s reasoning for
+delaying the write applies — stamp it the same way the "blocked, can't
+help" comment-only case does.
+
+This check's picks count toward the same **fixed-5 total** as Batch 1/2 (see
+"Batch size" below) — it runs first and takes priority, but does not grant
+extra budget. Batch 1's quota becomes `5 - len(priority_picked)`, and
+Batch 2's becomes `5 - len(priority_picked) - len(batch1_picked)`.
+
+---
+
 ## Batch 1 — stale In Progress
 
 ```
@@ -145,9 +246,11 @@ list_kanban_cards(status="running", limit=100, order="edited")
    resumable session and a human still paying attention to it).
 3. Walk down that list and, for each candidate, run the **back-off check**
    first, then the **run check** below — in that order, so a card that's
-   already backed off never costs a `list_runs` call. Take the **first 5
-   that pass both**. Fewer than 5 passing is fine — do not relax the
-   staleness, back-off, or terminal-run rules to fill the quota.
+   already backed off never costs a `list_runs` call. Take the **first
+   `5 - len(priority_picked)` that pass both** (the Priority check above
+   runs first and may have already spent part of the fixed-5 budget).
+   Fewer passing than that is fine — do not relax the staleness, back-off,
+   or terminal-run rules to fill the quota.
 
 ### Back-off check
 
@@ -289,7 +392,8 @@ back-off clock on top of it.
 
 ## Batch 2 — Need Human complement (fills remaining slots up to 5)
 
-Only runs if Batch 1 picked fewer than 5. Needed = `5 - len(batch1_picked)`.
+Only runs if the Priority check + Batch 1 together picked fewer than 5.
+Needed = `5 - len(priority_picked) - len(batch1_picked)`.
 
 ```
 list_kanban_cards(status="need_human", limit=100, order="edited")
@@ -471,8 +575,10 @@ avoid that.
 
 ## Batch size
 
-**Fixed at 5 total** (Batch 1 + Batch 2 combined). Not configurable, not a
-default — do not read it from anywhere else or let it drift with board size.
+**Fixed at 5 total** (Priority check + Batch 1 + Batch 2 combined). Not
+configurable, not a default — do not read it from anywhere else or let it
+drift with board size. The Priority check runs first and takes from this
+same budget; it does not add to it.
 
 ---
 
@@ -497,7 +603,13 @@ End with a plain-text report, not a presentation and not `mark_flow_done`:
   `register_callback`, not written in this pass — it lands (or is
   correctly skipped, if the card's status changed first) on a later
   wake-up, see "Deferred stamp". Do not report a card as "stamped" in
-  this pass; it isn't yet.
+  this pass; it isn't yet. This does not apply to a Priority-check pick —
+  that stamp is written inline, in this same pass, say so plainly.
+* Cards **picked by the Priority check**, separately from Batch 1/2 —
+  which run's `flow_needs_human` triggered it, the run's own status, and the
+  card's Status before the correcting move. If the scan window
+  (`list_runs(limit=300)`) came back saturated, say so — that's the signal
+  it may be missing older escalations, not proof there are none.
 
 Report what is true, not what is tidy — a skipped batch, a run check that
 failed to resolve, or a session still in flight all belong in the report
