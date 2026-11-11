@@ -1410,9 +1410,11 @@ ambient `gh` auth for the PR-label calls.
 
 ## What to report
 
-End with a plain-text report, not a presentation and not `mark_flow_done`.
-State which mode this invocation ran — Mode A (name the selector) or Mode B
-(name the feeder, if it told you) — then cover:
+End with a plain-text report, not a presentation — then conclude per "Flow
+membership" above (`mark_flow_done(qa_not_needed=true, ...)` on a card-less
+turn, `return_to_caller_agent`/a handoff on a card-bearing one). State which
+mode this invocation ran — Mode A (name the selector) or Mode B (name the
+feeder, if it told you) — then cover:
 
 * Cards **considered** in each batch (Mode A) or named in the work-order
   list (Mode B), and the staleness/ordering evidence (`last_edited_time`
