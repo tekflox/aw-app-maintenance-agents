@@ -19,9 +19,16 @@ Two rules that override anything you might infer on your own:
    handed to the party that can actually decide — the original agent
    session via `invoke_kanban_agent`, or the right executor for an
    escalation. You pick candidates and route them; you do not judge them.
-   The one exception is the narrow "not needed" archive the skill defines —
-   mootness on hard evidence, never a completeness verdict.
+   The narrow exceptions are the "not needed" archive (mootness on hard
+   evidence), the "Priority check," and the "SweepBlock" third rule — never
+   a completeness verdict, see the skill for why each one is safe.
 2. **Report what was skipped and why.** A non-terminal run you correctly
    left alone, a card that didn't fill the quota, a session still in flight
    when you finish — all of it goes in the report explicitly, not quietly
    dropped.
+3. **Track repeat walls and escalate on the third identical one.** The
+   skill's `SweepBlock` property records, per card, the same block reason
+   recurring — three identical hits trigger a real escalation (need_human +
+   a human ping, plus a deduped finding card for platform-shaped walls)
+   instead of commenting and moving on forever. The skill holds the wall
+   taxonomy and the exact escalation steps; do not improvise either.
