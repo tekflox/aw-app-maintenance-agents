@@ -73,12 +73,12 @@ ext["kanban-sweeper"] = {
     "moved_done": "card moved to Done",
     "archived_not_needed": "card archived as moot, not completeness",
     "resumed": "original session resumed via invoke_kanban_agent",
-    "routed": "escalated to product-owner/architect (see item.to)",
+    "routed": "routed to a named actor per the routing matrix (see item.to: coder/architect/product-owner/human)",
     "backed_off": "skipped: LastSweptAt back-off still in effect",
     "skipped_active_run": "skipped: a non-terminal run is in flight",
     "skipped_quota": "candidate passed checks but the 5-card quota was full",
     "resume_failed": "invoke_kanban_agent failed, fell back to run_agent_async",
-    "blocked": "sweeper could not act, left for a human",
+    "wall_recorded": "non-interpretable wall (no-work-run/no-session/resume-transport): comment+stamp only, no actor chosen yet, N=3 backstop pending",
     "escalated": "third rule fired: N identical refusals, moved to need_human + pinged a human"
   },
   "iterations": [
@@ -92,7 +92,9 @@ ext["kanban-sweeper"] = {
       "items": [
         {"id": "<notion page_id>", "title": "<=60 chars", "outcome": "moved_done"},
         {"id": "<notion page_id>", "title": "<=60 chars", "outcome": "routed",
-         "to": "architect", "note": "optional, short"}
+         "to": "architect", "note": "optional, short"},
+        {"id": "<notion page_id>", "title": "<=60 chars", "outcome": "routed",
+         "to": "human", "note": "qa-dedup-409, QA approved, awaiting sign-off"}
       ]
     }
   ],
@@ -375,6 +377,126 @@ Batch 2's becomes `5 - len(priority_picked) - len(batch1_picked)`.
 
 ---
 
+## Routing matrix — every no-progress touch ends in a named action
+
+A touch that makes no progress on a card no longer terminates in a passive,
+comment-only "flagging for a human" note — that outcome class is
+**abolished**. Every stale no-progress touch (Batch 1, Batch 2, or a
+Deferred-stamp wake-up) that cannot cleanly resume-and-conclude must end in
+exactly one of four named actions, and the `🧹` comment states which:
+
+1. **"➡️ Dispatching back to coder"** — the stuck-ness looks like it needs
+   more implementation work.
+
+   ```
+   run_agent_async(
+     slug=<the pinned work run's source_slug, falling back to the card's AgentSlug>,
+     input=f"{page_id}\n\n{short_summary_of_prior_run_final_output}\n\nWhat looks unfinished: {what_looks_unfinished}",
+     notion_task_id=page_id,
+     call_me_back=false,
+   )
+   ```
+
+   Same `register_callback` deferred-stamp handling as the existing
+   explainable-failure fallback in Batch 1 ("Acting on a qualifying card").
+
+2. **"🏛️ Asking Architect for help"** — the stuck-ness looks like a
+   design/approach question, or QA bounced on architecture.
+
+   ```
+   run_agent_async(slug="architect", input=f"{page_id}\n\n{escalation_comment_or_summary}",
+                   notion_task_id=page_id, call_me_back=false)
+   ```
+
+3. **"📋 Asking PO for help"** — the stuck-ness looks like a
+   scope/priority/mootness question.
+
+   ```
+   run_agent_async(slug="product-owner", input=f"{page_id}\n\n{escalation_comment_or_summary}",
+                   notion_task_id=page_id, call_me_back=false)
+   ```
+
+4. **"🙋 Sent to Need Human"** — genuinely only a human can act.
+
+   ```
+   ask_human(question=<the concrete decision needed, with evidence: run ids, QA verdict, timestamps>)
+   move_kanban_task(page_id, status="need_human",
+                     comment="🧹 kanban-sweeper: 🙋 Sent to Need Human — <evidence>")
+   ```
+
+   if the move isn't hard-locked (`QAStatus="In Progress"` — on rejection:
+   `ask_human` + comment only, report the rejected move explicitly, same
+   fallback the SweepBlock third rule uses below). Then write `SweepBlock`
+   as `routed-human|1|<iso>|<detail>` so the next pass does **not** re-ping
+   — a `routed-human` marker clears only via a new comment or status
+   change, same semantics as the third rule's `escalated` marker (see the
+   Update rule below). `routed-human` is not a sixth wall; it's a
+   card-level sentinel written by this destination alone.
+
+Destinations 1-3 each produce a running work run on the card — the existing
+liveness probe makes the card untouchable next sweep until that run ends,
+and its eventual reply re-arms `LastSweptAt`'s back-off naturally, same as
+the explainable-failure fallback already does. Tell the dispatched agent
+explicitly, in the `input` text, to leave its conclusion as a comment on
+the card. All three follow the same "Then, either way" comment +
+`register_callback` sequence a Batch 1 dispatch does — `LastSweptAt` is
+deferred, not stamped inline. Destination 4 never dispatches, so it stamps
+`LastSweptAt` inline, same as the "blocked, can't help" no-dispatch case
+below.
+
+### The routing decision — signals, not verdicts
+
+The sweeper never judges whether the work is complete (Rule 1 is
+unchanged) — routing only picks the next **actor**, using signals it
+already has: the pinned work run's status/`source_slug`, the `QAStatus`
+property, and the latest comments. This table is the shared matrix used by
+**both** Batch 1 (routing an interpretable SweepBlock wall) and Batch 2
+(routing a Need Human card) — it supersedes Batch 2's previous
+PO-vs-architect-only table.
+
+| Signal | Route to |
+|---|---|
+| Pinned work run ended `error`, or QA verdict = failed/bounced on implementation grounds | coder (1) |
+| Latest comments raise a design/approach question, or QA bounced on architecture | architect (2) |
+| Scope/priority/mootness question, conflicting asks | product-owner (3) |
+| QA approved + awaiting manual test/sign-off, needs credentials/external access, or an explicit "waiting on Frederico" in the thread | human (4) — fires on the **first** such touch, not at N=3 |
+| Ambiguous | keep today's default: resume the original session via `invoke_kanban_agent` (that **is** an action) — only if that resume is itself refused/blocked does this matrix decide |
+
+### Interaction with SweepBlock / the third rule — layered, not replaced
+
+The matrix above layers on top of the SweepBlock third rule (see
+"SweepBlock — repeat-wall detection and escalation" below); it does not
+replace it:
+
+- **Interpretable walls route immediately**, on the first touch:
+  `qa-dedup-409` (a QA verdict already exists for this card — read it:
+  approved → human (4), failed → coder (1)) and `resume-ineffective` (the
+  resumed session couldn't decide → the signals table above picks the
+  actor). Still **increment `SweepBlock`** per the Update rule — the count
+  now tracks routing *attempts*, and the N=3 backstop still fires if the
+  identical wall keeps recurring despite routing. **Order matters here**:
+  read the current `SweepBlock` count *before* acting. If this hit would
+  bring the count to 3, skip the routing action described in this section
+  entirely and run the third rule's escalation instead (per "This
+  replaces, not adds to, whatever comment the calling step was about to
+  post" below) — one touch is either a routing dispatch or an escalation,
+  never both. Below 3, route per the matrix and increment as normal.
+- **Non-interpretable walls are unchanged**: `no-work-run`, `no-session`,
+  and `resume-transport` keep the existing comment-and-stamp behavior,
+  with the N=3 backstop as their only escalation path — these are
+  transient platform failures, and pinging a human on every transient
+  blip would be the same spam in mirror form.
+- The `ask_human`-failure edge from the third rule applies here too: if
+  `ask_human` fails on a scheduled (`agent_run`-initiated) session,
+  comment-only + report is the permitted exception — the comment must say
+  the ping itself failed.
+
+Budget: a routing dispatch counts as that card's one touch for the pass —
+never more than one dispatch per card per pass, same as every other action
+in this skill (see "Batch size" below).
+
+---
+
 ## Batch 1 — stale In Progress
 
 ```
@@ -547,34 +669,46 @@ run check already carried forward), not since `last_edited_time`.
   response carries its own `run_id` too, keep it the same way.
 
   If this fallback **also** fails, record wall `no-session` via the
-  SweepBlock Update rule below. None of these three failure branches ever
-  dispatched anything, so there is no `run_id` to carry into "Then, either
+  SweepBlock Update rule below — a **non-interpretable** wall, the N=3
+  backstop (see "SweepBlock" below) is its only escalation path. No
+  dispatch happened, so there is no `run_id` to carry into "Then, either
   way" below — comment and stamp `LastSweptAt` **inline, now**, the same
   way the "blocked, can't help" no-dispatch case does (see below): there is
   no reply to wait for, so there is nothing to `register_callback` on.
 * **`invoke_kanban_agent` returns the server's QA-dedup guard 409** (a QA
   run already exists for this card; the guard also fires on a resume, not
   only a fresh dispatch) → do **not** try the `run_agent_async` fallback,
-  it hits the identical guard — record wall `qa-dedup-409` via the
-  SweepBlock Update rule below, same as today's existing decline-and-comment
-  behavior, then comment and stamp `LastSweptAt` inline, same as above —
-  no dispatch means no `run_id`, so skip "Then, either way" below entirely.
+  it hits the identical guard. This is an **interpretable** wall — record
+  wall `qa-dedup-409` via the SweepBlock Update rule below **first**: if
+  this hit brings the count to 3, the Update rule's own third-rule
+  escalation is this touch's entire action (per "Order matters here" in
+  "Routing matrix" above) — stop, do not also route. Otherwise, route it
+  immediately per "Routing matrix" above: read the existing QA run's
+  verdict (the `QAStatus` property, or the QA run's own result). Approved →
+  destination 4 (🙋 Sent to Need Human — no dispatch, comment and stamp
+  `LastSweptAt` inline, same as the no-dispatch case below). Failed →
+  destination 1 (➡️ Dispatching back to coder — a real dispatch, follow
+  "Then, either way" below: comment + `register_callback`, `LastSweptAt`
+  deferred).
 * **`invoke_kanban_agent` or its fallback dies with the zero-token/no-LLM-
   turn transport-failure signature** (see the
   `aw-autoskill-kanban-sweeper-resume-transport-failures` skill for the
   retry/fallback protocol) → once that protocol is exhausted with no
   successful dispatch, record wall `resume-transport` via the SweepBlock
-  Update rule below, then comment and stamp `LastSweptAt` inline, same as
-  above — same reasoning, no dispatch, no `run_id`.
+  Update rule below — also **non-interpretable**, N=3 backstop only — then
+  comment and stamp `LastSweptAt` inline, same as above — same reasoning,
+  no dispatch, no `run_id`.
 
-**"Then, either way" below applies only to the two outcomes above it that
-actually dispatched something** (`invoke_kanban_agent` succeeded, or its
-explainable-failure fallback succeeded) — each of those produces a real
-`run_id` to register a callback on. The three failure branches just above
-are a different case: nothing dispatched, so they stamp inline instead,
-exactly like "blocked, can't help" below, and never reach this block.
+**"Then, either way" below applies to every outcome above that actually
+dispatched something** — `invoke_kanban_agent` succeeding, its
+explainable-failure fallback succeeding, or the `qa-dedup-409` wall routing
+to destination 1 (coder) — each produces a real `run_id` to register a
+callback on. The remaining branches (`no-session`, `qa-dedup-409` routed to
+destination 4, `resume-transport`) never dispatch anything, so they stamp
+inline instead, exactly like "blocked, can't help" below, and never reach
+this block.
 
-For those two dispatch-succeeded outcomes:
+For whichever of those dispatch-succeeded outcomes fired:
 
 ```
 add_kanban_comment(page_id, text="🧹 kanban-sweeper: <what was done and why>")
@@ -630,17 +764,18 @@ chars of comment history; do not read the whole thing, slice the tail. (See
 the `aw-autoskill-huge-kanban-card-comments` skill if the response needs that
 treatment.)
 
-Decide **fresh, every time — never hardcoded** what kind of question the
-latest comment is raising:
-
-| The comment is asking... | Route to |
-|---|---|
-| A genuine scope / product / priority call | `product-owner` |
-| A design / approach question, or a QA bounce-back | `architect` |
+Decide **fresh, every time — never hardcoded** which of the four named
+actions the latest comment calls for, using the shared "Routing matrix"
+signals table above (this supersedes the PO-vs-architect-only table this
+section used to carry) — destinations 1-3 (coder/architect/product-owner)
+dispatch exactly as below; destination 4 (human) has no dispatch, see its
+own paragraph right after:
 
 ```
 run_agent_async(
-  slug=<"product-owner" or "architect", per the judgment above>,
+  slug=<the card's AgentSlug (coder route — Batch 2 does no run-check, so
+        there is no pinned run's source_slug to prefer here) | "architect" |
+        "product-owner", per the matrix above>,
   input=f"{page_id}\n\n{escalation_comment}\n\ndecide and route; move the card when you have",
   notion_task_id=page_id,
   call_me_back=false,
@@ -663,6 +798,19 @@ inline here. Keep `(page_id, run_id, "Need Human")` in your own notes,
 same as Batch 1. See "Deferred stamp" right below for how the wake-up
 this produces gets handled.
 
+**Destination 4 (human)** — the matrix resolves to "only a human can
+act" even though the card is already in Need Human: that card has sat
+there with nobody actually pinged, exactly the Nov 5-6 screenshot failure
+mode. There is nothing to dispatch and no status move needed (it's already
+`need_human`) — `ask_human(question=...)` with the evidence, comment
+naming "🙋 Sent to Need Human", write `SweepBlock` as
+`routed-human|1|<iso>|<detail>`, and stamp `LastSweptAt` **inline**, same
+as the no-dispatch case in Batch 1.
+
+**Ambiguous** (Batch 2 has no live run to fall back on resuming, unlike
+Batch 1) → default to `architect`, as the closest generalist call among
+the three dispatchable destinations.
+
 ---
 
 ## Deferred stamp — closing the loop on wake-up
@@ -672,7 +820,10 @@ goes terminal, carrying its result. Expect to be woken up this way once
 per card you touched in Batch 1 or Batch 2 (not for a card that was
 skipped, backed off, or archived — those never produced a run_id or a
 registration), each at its own unpredictable time, not all together and
-not necessarily in the order you touched the cards.
+not necessarily in the order you touched the cards. A card can produce a
+*second* wake-up beyond that first one if step 4 below itself dispatches a
+new routing action — the same mechanism recursing one more hop, not a new
+one.
 
 Each wake-up only carries the one `run_id` it's about — you are not
 juggling a shared list across turns. Session-resume for a given
@@ -716,13 +867,36 @@ On each such wake-up:
    * **Terminal `error`, or terminal `success` with no new reply comment**
      → record wall `resume-ineffective:<session8>` (`<session8>` = the
      first 8 characters of the dispatched run's own `session_id`) via the
-     SweepBlock Update rule below.
+     SweepBlock Update rule below **first**: if this hit brings the count
+     to 3, the Update rule's own third-rule escalation is this touch's
+     entire action (per "Order matters here" in "Routing matrix" above) —
+     stop, do not also route. This is an **interpretable** wall, so
+     otherwise route it immediately per "Routing matrix" above, using the
+     signals available right here (the dispatched run's own
+     status/`source_slug`, the `QAStatus` property, the card's latest
+     comments), and post the `🧹` comment naming the action taken.
+     Destinations 1-3 dispatch a new run — see step 4 below for how that
+     defers the stamp again. Destination 4 pings `ask_human`, attempts the
+     `need_human` move, and
+     writes the `routed-human` SweepBlock marker, same as the matrix
+     section describes — no dispatch, so the stamp in step 4 applies
+     inline this same turn.
    * **Terminal `success` with a new reply comment** → a clean touch;
      clear `SweepBlock` per the Update rule, if it held a value for this
      card already.
-4. Regardless of step 3's outcome, stamp now — SweepBlock is a separate,
-   additional write, never a substitute for the `LastSweptAt` back-off
-   clock:
+4. **If step 3 just dispatched a new routing action** (destinations 1-3
+   above) — a new run is now in flight for this card, so stamping now
+   would be wrong. Treat it exactly like any other Batch 1/2 dispatch:
+   `add_kanban_comment` (already done in step 3) +
+   `register_callback(run_id=<the new routing dispatch's run_id>)`, and
+   wait for *that* wake-up before stamping — same mechanism, one more hop.
+   Keep the new `(page_id, run_id, status_at_touch)` triple the same way a
+   fresh Batch 1/2 dispatch would.
+
+   **Otherwise** (step 3 resolved as a clean touch, or ended in
+   destination 4's `ask_human` ping with no dispatch to wait on) — stamp
+   now. SweepBlock is a separate, additional write, never a substitute for
+   the `LastSweptAt` back-off clock:
 
    ```
    set_kanban_property(page_id, "LastSweptAt", <now>)
@@ -750,10 +924,13 @@ No separate report is needed for this wake-up turn beyond a short note of
 what you did, this is bookkeeping closing out a card from a previous
 pass, not a new sweep.
 
-A "blocked, can't help" comment-only touch with no dispatch at all has
-nothing to register a callback on, so for that case alone, stamp
+A touch that resolves with no dispatch at all — the non-interpretable
+`no-session`/`resume-transport` walls (the "blocked, can't help" case), or
+a routing action that resolves to destination 4 (🙋 Sent to Need Human, an
+`ask_human` ping with no agent dispatch) — has nothing to register a
+callback on, so for those cases alone, stamp
 `set_kanban_property(page_id, "LastSweptAt", <now>)` inline, right after
-the comment, exactly as before, there is no reply to wait for.
+the comment, exactly as before: there is no reply to wait for.
 
 ---
 
@@ -803,7 +980,12 @@ avoid that.
 The two rules at the top make the sweeper correctly refuse to force work
 through a wall it hits — but on their own they give it no way to notice "I
 have hit this *exact* wall on this *exact* card three sweeps running" and do
-anything but comment and move on, forever. This section is that mechanism:
+anything but comment and move on, forever. Two of the five walls below
+(`qa-dedup-409`, `resume-ineffective`) no longer wait for that: the
+"Routing matrix" section above routes them to a named actor on the very
+first hit. `SweepBlock` still tracks them here as routing attempts, and
+the N=3 backstop below still applies if routing itself keeps failing on
+the identical wall. This section is that mechanism:
 a dedicated Notion property tracking repeat walls per card, a closed
 vocabulary of what counts as a "wall," and a fixed escalation once a wall
 repeats three times. Like the "Priority check" above, this is the sweeper
@@ -865,10 +1047,16 @@ a different wall, not a repeat of this one).
 
 Whenever a touch anywhere in this skill (Priority check, Batch 1, Batch 2,
 or a Deferred-stamp wake-up) concludes — whether in one of the five wall
-outcomes below or a clean resolution — read the current `SweepBlock` (the
-same `get_kanban_properties` call already reading `LastSweptAt`/`Status` for
-that step costs nothing extra to extend) and:
+outcomes below, a routing-matrix `routed-human` action, or a clean
+resolution — read the current `SweepBlock` (the same `get_kanban_properties`
+call already reading `LastSweptAt`/`Status` for that step costs nothing
+extra to extend) and:
 
+* **Stored value reads `routed-human|...`** → **no-op**, exactly like the
+  `escalated` branch right below — the routing matrix already pinged a
+  human for this card on a prior touch, and no wall outcome re-pings it.
+  `routed-human` is a card-level sentinel, not tied to any particular
+  `wall_key`.
 * **Stored value already reads `<wall_key>|escalated|...` for this same
   `wall_key`** → **no-op, regardless of `<detail>`.** Match on `wall_key`
   alone here, not `wall_key` + `<detail>` — `<detail>` legitimately varies
@@ -906,15 +1094,18 @@ is written right alongside that step's existing comment.
 
 When an increment brings a `wall_key`'s count to **3**:
 
-**This replaces, not adds to, whatever comment the calling step was about
-to post.** Every wall-recording call site above says "record wall ... via
-the Update rule, then comment [and stamp `LastSweptAt`] inline" — if
+**This replaces, not adds to, whatever action the calling step was about
+to take.** Every wall-recording call site above says "record wall ... via
+the Update rule, then comment [and stamp `LastSweptAt`] inline" (or, for
+`qa-dedup-409`/`resume-ineffective`, "route per the Routing matrix") — if
 *this* invocation of the Update rule is the one that reaches count=3, its
 own `move_kanban_task`/`add_kanban_comment` below already is that touch's
 comment and its `SweepBlock` write already is that touch's stamp. Skip the
 calling step's separate generic `"🧹 kanban-sweeper: <what was done and
-why>"` comment and its own `LastSweptAt`/`SweepBlock` write entirely for
-this one touch — do not post both.
+why>"` comment (or, for an interpretable wall, the routing dispatch/
+`ask_human` call it would otherwise have made) and its own
+`LastSweptAt`/`SweepBlock` write entirely for this one touch — do not post
+both and do not also route.
 
 **a) Always**, regardless of `wall_key`:
 
@@ -1031,16 +1222,19 @@ End with a plain-text report, not a presentation and not `mark_flow_done`:
   the skip.
 * Cards **archived as not-needed**, with the evidence cited for each.
 * Per picked card: what action was taken (resumed / fallback-dispatched /
-  routed to product-owner vs architect and why), and the **observed outcome
-  so far** — if the resumed/dispatched session hasn't concluded by the time
-  you report, say that plainly. Its eventual verdict is its own, not yours
-  to wait for or fabricate.
+  routed to coder, architect, product-owner, or human via the routing
+  matrix — name the signal that drove the choice), and the **observed
+  outcome so far** — if the resumed/dispatched session hasn't concluded by
+  the time you report, say that plainly. Its eventual verdict is its own,
+  not yours to wait for or fabricate. For a destination-4 (human) route,
+  name the `ask_human` call and whether the `need_human` move succeeded.
 * Per picked card, say that its `LastSweptAt` stamp is **deferred** via
   `register_callback`, not written in this pass — it lands (or is
   correctly skipped, if the card's status changed first) on a later
   wake-up, see "Deferred stamp". Do not report a card as "stamped" in
-  this pass; it isn't yet. This does not apply to a Priority-check pick —
-  that stamp is written inline, in this same pass, say so plainly.
+  this pass; it isn't yet. This does not apply to a Priority-check pick,
+  or a routing-matrix destination-4 (human) pick — both stamp inline, in
+  this same pass, say so plainly.
 * Cards **picked by the Priority check**, separately from Batch 1/2 —
   which run's `flow_needs_human` triggered it, the run's own status, and the
   card's Status before the correcting move. If the scan window
