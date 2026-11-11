@@ -511,22 +511,34 @@ run check already carried forward), not since `last_edited_time`.
   response carries its own `run_id` too, keep it the same way.
 
   If this fallback **also** fails, record wall `no-session` via the
-  SweepBlock Update rule below, comment what was tried, and move on — there
-  is no third dispatch path to try.
+  SweepBlock Update rule below. None of these three failure branches ever
+  dispatched anything, so there is no `run_id` to carry into "Then, either
+  way" below — comment and stamp `LastSweptAt` **inline, now**, the same
+  way the "blocked, can't help" no-dispatch case does (see below): there is
+  no reply to wait for, so there is nothing to `register_callback` on.
 * **`invoke_kanban_agent` returns the server's QA-dedup guard 409** (a QA
   run already exists for this card; the guard also fires on a resume, not
   only a fresh dispatch) → do **not** try the `run_agent_async` fallback,
   it hits the identical guard — record wall `qa-dedup-409` via the
-  SweepBlock Update rule below and comment, same as today's existing
-  decline-and-comment behavior.
+  SweepBlock Update rule below, same as today's existing decline-and-comment
+  behavior, then comment and stamp `LastSweptAt` inline, same as above —
+  no dispatch means no `run_id`, so skip "Then, either way" below entirely.
 * **`invoke_kanban_agent` or its fallback dies with the zero-token/no-LLM-
   turn transport-failure signature** (see the
   `aw-autoskill-kanban-sweeper-resume-transport-failures` skill for the
   retry/fallback protocol) → once that protocol is exhausted with no
   successful dispatch, record wall `resume-transport` via the SweepBlock
-  Update rule below and comment.
+  Update rule below, then comment and stamp `LastSweptAt` inline, same as
+  above — same reasoning, no dispatch, no `run_id`.
 
-Then, either way:
+**"Then, either way" below applies only to the two outcomes above it that
+actually dispatched something** (`invoke_kanban_agent` succeeded, or its
+explainable-failure fallback succeeded) — each of those produces a real
+`run_id` to register a callback on. The three failure branches just above
+are a different case: nothing dispatched, so they stamp inline instead,
+exactly like "blocked, can't help" below, and never reach this block.
+
+For those two dispatch-succeeded outcomes:
 
 ```
 add_kanban_comment(page_id, text="🧹 kanban-sweeper: <what was done and why>")
@@ -822,7 +834,12 @@ of a clean resolution, read the current `SweepBlock` (the same
 that step costs nothing extra to extend) and:
 
 * **Stored value already reads `<wall_key>|escalated|...` for this same
-  `wall_key` (+ `<detail>`)** → **no-op.** Do not re-increment (there is no
+  `wall_key`** → **no-op, regardless of `<detail>`.** Match on `wall_key`
+  alone here, not `wall_key` + `<detail>` — `<detail>` legitimately varies
+  between hits of the same wall even after escalation (e.g. `qa-dedup-409`
+  against a newer QA run id), and none of that changes the verdict: a
+  human was already pinged for this exact wall on this exact card, and a
+  varying `<detail>` doesn't un-ping them. Do not re-increment (there is no
   numeric count to increment — `escalated` replaced it) and do not re-run
   the escalation actions below. The `escalated` marker stands until the
   Update rule's own clean-touch/status-change branch clears it; a repeat
@@ -889,6 +906,18 @@ platform-wide occurrence counting for free):
 triage calls (a genuinely missing dispatch, or a genuinely sessionless run),
 not a platform-defect pattern a debugger can act on from a finding card
 alone.
+
+**Known gap, not silently assumed away:** `create_kanban_task`'s own dedup
+only reliably reopens a prior finding card from `Done` — one already moved
+to `Self-closed`, `auto_resolved`, or `Archived` either gets its
+`occurrence_count` bumped with no Backlog resurfacing, or (for `Archived`)
+is skipped outright (`ok:true, skipped:true`), in neither case reaching the
+`debugger` again. So "file or bump" here can genuinely no-op on a wall that
+is, in fact, still recurring, if a human or the system-analyst already
+closed the earlier finding card as resolved. Report this plainly rather
+than asserting the finding is actionable: say what `create_kanban_task`
+returned (`is_new`, `occurrence_count`) in the escalation report, so a
+silent no-op here is visible instead of read as "handled."
 
 This is the **third** narrow, explicitly-granted exception to Rule 1 (see
 "Priority check" above for the second, and "Not needed" for the first): the
