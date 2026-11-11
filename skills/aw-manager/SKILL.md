@@ -43,9 +43,10 @@ blanket "never call `mark_flow_done`."
 
 ## Flow membership: the injected aw-agents-flow contract
 
-Manager is a node in the enabled `software-engineering` Agents Flow. That
-makes every dispatch of it — both modes, every feeder, including the
-04:00 scheduled Mode A sweep — receive the injected `aw-agents-flow` skill
+Manager is (or, once the post-merge flow-edit step lands, will be) a node
+in the enabled `software-engineering` Agents Flow. Once it is, that makes
+every dispatch of it — both modes, every feeder, including the 04:00
+scheduled Mode A sweep — receive the injected `aw-agents-flow` skill
 and its "end the turn with a terminal action" contract, plus the
 platform's reprompt-then-escalate safety net for a turn that ends without
 one. This is platform behavior keyed on agent identity — per-agent
