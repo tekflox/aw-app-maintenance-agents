@@ -914,7 +914,10 @@ When an increment brings a `wall_key`'s count to **3**:
    comment history for the per-attempt run ids and timestamps, since every
    prior touch already posted one of those (Batch 1/Batch 2's
    `add_kanban_comment` step) — that thread, not `SweepBlock`, is where the
-   full 3-attempt history actually lives. For `qa-dedup-409` specifically,
+   full 3-attempt history actually lives. **Exception: `no-work-run`** skips
+   silently (no comment posted, see its trigger in the Run check above) —
+   escalating on it has only `SweepBlock`'s own latest timestamp/detail to
+   cite, no comment thread to point at. For `qa-dedup-409` specifically,
    also name the existing QA run's id and its verdict. State explicitly:
    "escalated by the sweeper's third rule after 3 identical refusals." If
    the move is rejected (the hard-lock while `QAStatus="In Progress"` — see
@@ -942,7 +945,11 @@ platform-wide occurrence counting for free):
 `no-work-run` and `no-session` get **no** finding card — these are human
 triage calls (a genuinely missing dispatch, or a genuinely sessionless run),
 not a platform-defect pattern a debugger can act on from a finding card
-alone.
+alone. `resume-ineffective` where the resumed run's `source_slug` **does**
+match the card's own `AgentSlug` (the right agent was resumed, it just had
+no effect) also gets **no** finding card — only its wrong-session sub-case
+above does; this sub-case's `need_human` move + `ask_human` ping still fire
+either way.
 
 **Known gap, not silently assumed away:** `create_kanban_task`'s own dedup
 only reliably reopens a prior finding card from `Done` — one already moved
