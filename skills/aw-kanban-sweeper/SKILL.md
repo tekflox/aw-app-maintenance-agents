@@ -50,11 +50,11 @@ write from this path would silently skew the ring for every reader.
 get_plan_memory("kanban-sweep")
 ```
 
-Pull `ext["kanban-sweeper"].carry` and, if present,
-`ext["kanban-sweeper"].iterations[0]` — carry-forward notes and the last
-few passes' card lists feed candidate ordering alongside `LastSweptAt`.
-`LastSweptAt` stays the authoritative per-card back-off; memory only
-supplements it, it never replaces it or overrides a back-off skip.
+Pull `ext["kanban-sweeper"].carry` and the full `iterations` ring (bounded
+to 10 entries, newest first) — carry-forward notes and recent passes' card
+lists feed candidate ordering alongside `LastSweptAt`. `LastSweptAt` stays
+the authoritative per-card back-off; memory only supplements it, it never
+replaces it or overrides a back-off skip.
 
 **The schema — this is the one file that owns the sweeper's concrete
 vocabulary** (the generic `plan-steward` prompt deliberately only teaches
@@ -128,6 +128,19 @@ memory write must never cost the iteration close.
 Then close the iteration as normal. This section changes nothing about how
 or when you call `finish_plan_iteration` itself — see the `plan-steward`
 agent's own contract for that; this is only about what you write before it.
+
+**Known, accepted race:** `update_plan_memory` replaces the whole subtree
+you read, with no version check on your own `writer_key`. Only one Plan
+iteration is normally open on "kanban-sweep" at a time (the cadence claim),
+so this only bites if a prior iteration's session is still alive and writes
+late after the watchdog already timed it out and freed the claim for a new
+one — a late write from a dead-but-not-yet-stopped session landing after
+the new iteration's write. Writing promptly, right before closing, is the
+only mitigation this skill gives you; there is no server-side fence (same
+risk the Architect named rather than a new one), and memory is supplementary
+to `LastSweptAt`, never authoritative, so a lost or overwritten entry here
+degrades the "what did the last run do" answer, not the sweep's own
+correctness.
 
 ---
 
