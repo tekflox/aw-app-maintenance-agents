@@ -1476,10 +1476,15 @@ feeder, if it told you) — then cover:
 * Mode B items with a **missing or malformed `page_id`** — report and move
   on, never guess which card was meant.
 * Cards **picked**, in order, with why they were chosen over the others.
-* Cards **skipped**, and why — non-terminal run, lease-token/malformed
-  `AgentRunId`, run lookup failed, or simply past the quota.
+* Cards **skipped**, and why — non-terminal run, **recent run activity**
+  (the 30-min gate: terminal but last activity ≤`STALE_RUN_MINUTES`
+  minutes ago), lease-token/malformed `AgentRunId`, run lookup failed
+  (including a probe error), or simply past the quota.
 * Cards skipped as **backed off**, with the `LastSweptAt` value that caused
   the skip.
+* If Batch 1's **25-run-check-probe cap** was hit, say so explicitly —
+  name the count of candidates still unwalked when the pass stopped; never
+  let this go unreported.
 * Cards **archived as not-needed**, with the evidence cited for each.
 * Per picked card: what action was taken (resumed / fallback-dispatched /
   routed to coder, architect, product-owner, or human via the routing
