@@ -115,6 +115,21 @@ A list item with a missing or malformed `page_id` is reported and skipped
 pipeline" below for each item (a selector's own job — deciding WHICH cards
 qualify — is already done by the feeder in this mode).
 
+**`work_loop` is the canonical Mode B feeder.** The `agents-platform-runners`
+tool `work_loop(loops=["attention"])` (architect design, Kanban
+4165bf3b-9510-810d; shipped PR #36) emits a `work_orders` list in exactly
+this shape — confirmed byte-compatible against the merged tool's actual
+output, no drift from the design during implementation. Its `evidence`
+string is where the tool's own pre-computed run-liveness check shows up —
+either `"newest work run <run_id> (source=<slug>) ended <N>min ago"` (a
+resumable run exists) or `"no dispatched run found for this card"` (none
+does) — see "Run check (non-negotiable exclusion)" below for what that
+changes about the two-call protocol. `suggested_action` arrives as either
+`"resume via invoke_kanban_agent run_id=<run_id>"` or `"needs routing — no
+prior run to resume"` — still a hint, not a directive; the per-card pipeline
+still makes its own routing-matrix judgment per the general Mode B rule
+above.
+
 **Shared touch budget, regardless of mode:** fixed at **5 cards per
 invocation** (see "Touch budget" below) — Mode A's selector and Mode B's
 work-order walk draw from the same budget, never an addition to it. A Mode
@@ -667,6 +682,14 @@ candidates exist on the board than its 500-card scan cap saw. Not expected
 in normal operation; treat it as a signal the board itself needs attention,
 not something to silently work around.
 
+**Superseded, not removed.** This `stale-sweep` selector (Mode A, direct
+`list_kanban_cards_need_attention` dispatch) is superseded going forward by
+`work_loop`-fed Mode B dispatches (see "Input contract" above) — the Kanban
+Sweep Plan's cadence switch to `work_loop(dispatch_manager=true)` is a
+separate, later card. Until that cadence switch lands, and for any direct
+Mode A invocation afterward, this selector keeps working exactly as
+documented here — it is not deleted or deprecated by this change.
+
 ---
 
 ## Batch 1 — stale In Progress
@@ -710,8 +733,25 @@ reported the same way as a run-check skip — reason `"backed off: last swept
 
 ### Run check (non-negotiable exclusion)
 
-For each candidate card, two lookups — a cheap liveness probe, then the
-pinned one:
+**Shortcut when the work order already carries a pre-computed run-check
+result.** `work_loop`'s `attention` loop (see "Input contract" above) runs
+this exact two-call check itself before a card ever becomes a work order —
+its evidence string already names either a resumable `resume_run_id` or
+states none exists. Minutes can still pass between `work_loop`'s probe and
+the Manager actually touching the card, so a freshly-started run must still
+block even though `work_loop` already said the card qualifies — run call ①
+below (the cheap unfiltered liveness probe) regardless, as a touch-time
+TOCTOU guard. Call ② (the pinned `category="work"` lookup) is skipped
+entirely for a work-loop-fed order — the qualifying run (or its absence) is
+already pre-computed in the evidence string, there is nothing left for call
+② to resolve. This shortcut applies only to work orders whose evidence line
+matches `work_loop`'s own phrasing above; a Mode B feeder that hands the
+Manager a bare `page_id`/`reason` with no run-check evidence of its own
+still gets the full two-call protocol below.
+
+For every other candidate — Mode A's `stale-sweep` walk, or a Mode B work
+order without `work_loop`'s evidence shape — two lookups, a cheap liveness
+probe, then the pinned one:
 
 ```
 list_runs(notion_task_id=page_id, limit=1)                           # 1. liveness probe, unfiltered
