@@ -696,6 +696,11 @@ the gate needs — no second lookup.
    quota isn't filled yet — report that the cap was hit explicitly in the
    pass report, never silently. A candidate that fails the back-off check
    doesn't count against this cap, since it never reaches the run check.
+   **Currently unreachable, not dead:** the merged list above is fetched
+   with `limit=10`, shared across both batches, so Batch 1 never sees more
+   than 10 candidates total and this cap cannot bind today. Left in place
+   as the backstop for if `limit` is ever raised past 25 in a future
+   change — don't delete it on the assumption it's now pointless.
 
 ### Back-off check
 
