@@ -298,10 +298,14 @@ before the same card can be picked again.
 
 Batch 1 (In Progress) no longer qualifies candidates this way — see "Batch
 1 — stale In Progress" below, qualification there is run-activity-based
-(`STALE_RUN_MINUTES`). `last_edited_time` still orders Batch 1's walk
-(closest-to-touched first), and the comment-resets-the-clock property above
-still matters for `LastSweptAt`'s own back-off check immediately below —
-only the *qualifying* use of edit-time moved to Batch 1's run check.
+(`STALE_RUN_MINUTES`). `last_edited_time` no longer orders either batch's
+walk either: both now walk the single `list_kanban_cards_need_attention`
+candidate list (see "Candidate list" below) in its own Priority →
+`created_time` → `LastSweptAt` order — owner-decided, supersedes the
+newest-edited-first rationale this section used to argue for.
+`last_edited_time` still matters in two places: Batch 2's 12h staleness
+filter below, and the comment-resets-the-clock property above for
+`LastSweptAt`'s own back-off check immediately below.
 
 ---
 
@@ -377,7 +381,11 @@ matter who wrote it — human or agent, no authorship distinction.
 
 * Stamp: `get_kanban_properties(page_id, properties=["LastSweptAt"])` → an
   ISO string, or `null` if never swept (the date flattens to its start
-  value, `client.py:389-390`).
+  value, `client.py:389-390`). **Skip this fetch for a Batch 1/Batch 2
+  candidate** — it already carries the stamp as `last_swept_at` on the
+  candidate object returned by `list_kanban_cards_need_attention` (see
+  "Candidate list" below). Only the Priority check, which doesn't call that
+  tool, still needs the standalone fetch.
 * Latest comment: `get_kanban_card(page_id, include_comments=true)` →
   `comments_md` lines read `"- **<created_time>** — text"`, oldest →
   newest; take the last line's timestamp.
@@ -629,37 +637,70 @@ in this skill (see "Batch size" below).
 
 ---
 
-## Batch 1 — stale In Progress
+## Candidate list — one merged, ordered call feeds Batch 1 + Batch 2
+
+Both batches below walk the **same** call, made once per pass (after the
+Priority check, before either batch runs):
 
 ```
-list_kanban_cards(status="running", limit=100, order="edited")
+list_kanban_cards_need_attention(limit=10)
 ```
+
+This returns the merged In Progress + Need Human candidate list, already
+sorted deterministically server-side: Priority (High > Medium > Low >
+missing) → `created_time` descending → `LastSweptAt` ascending
+(never-swept first) — see the `aw-kanban` skill. **Walk it top-down, as
+returned; do not re-sort it.** This supersedes the previous
+newest-edited-first walk order Batch 1 used to argue for (see "Why
+last_edited_time..." above) — the unified priority ordering replaces it,
+owner-decided.
+
+Each returned card already carries `last_swept_at` and `last_edited_time` —
+both batches read those straight off the candidate instead of a separate
+property fetch (see "Back-off — LastSweptAt" above for the back-off
+shortcut this enables). The tool itself applies **no** staleness filter and
+**no** run-check — those stay agent-side, below, per the approved design on
+card 4115bf3b.
+
+If the call reports `truncated: true`, say so in the pass report — more
+candidates exist on the board than its 500-card scan cap saw. Not expected
+in normal operation; treat it as a signal the board itself needs attention,
+not something to silently work around.
+
+---
+
+## Batch 1 — stale In Progress
+
+Filter the merged list above to the entries whose `status` is the board's
+"In Progress" option, in the order returned.
 
 Qualifying is run-activity-based, not edit-time-based: a card qualifies when
 no agent/monitor run tied to it has been active in the last
 `STALE_RUN_MINUTES = 30` minutes. `last_edited_time` no longer gates
-qualification here — any comment or property write still resets it, but
-that now only affects the order candidates are tried in, never whether one
-is picked. The 30-min gate itself lives inside the run check's liveness
-probe below, since that probe already fetches the one row (newest run of
-any category) the gate needs — no second lookup.
+qualification here, nor walk order (see "Candidate list" above) — any
+comment or property write still resets it, but that now affects neither.
+The 30-min gate itself lives inside the run check's liveness probe below,
+since that probe already fetches the one row (newest run of any category)
+the gate needs — no second lookup.
 
-1. Sort **all** `running` cards **newest-first** by `last_edited_time`
-   (closest-to-touched first, not the oldest zombies — deliberate: a card
-   with more recent activity is the one most likely to still have a live,
-   resumable session and a human still paying attention to it).
-2. Walk down that list and, for each candidate, run the **back-off check**
-   first, then the **run check** below (which now also carries the 30-min
-   gate) — in that order, so a card that's already backed off never costs a
-   `list_runs` call. Take the **first `5 - len(priority_picked)`** that pass
-   both (the Priority check above runs first and may have already spent
-   part of the fixed-5 budget). Fewer passing than that is fine — do not
-   relax the back-off, 30-min, or terminal-run rules to fill the quota.
-3. **Cap: 25 run-check probes per pass.** Once 25 candidates have reached
+1. Walk the filtered list top-down and, for each candidate, run the
+   **back-off check** first, then the **run check** below (which now also
+   carries the 30-min gate) — in that order, so a card that's already
+   backed off never costs a `list_runs` call. Take the **first
+   `5 - len(priority_picked)`** that pass both (the Priority check above
+   runs first and may have already spent part of the fixed-5 budget).
+   Fewer passing than that is fine — do not relax the back-off, 30-min, or
+   terminal-run rules to fill the quota.
+2. **Cap: 25 run-check probes per pass.** Once 25 candidates have reached
    the run check (i.e. passed back-off), stop walking the list even if the
    quota isn't filled yet — report that the cap was hit explicitly in the
    pass report, never silently. A candidate that fails the back-off check
    doesn't count against this cap, since it never reaches the run check.
+   **Currently unreachable, not dead:** the merged list above is fetched
+   with `limit=10`, shared across both batches, so Batch 1 never sees more
+   than 10 candidates total and this cap cannot bind today. Left in place
+   as the backstop for if `limit` is ever raised past 25 in a future
+   change — don't delete it on the assumption it's now pointless.
 
 ### Back-off check
 
@@ -905,13 +946,16 @@ longer-lived back-off clock on top of that.
 Only runs if the Priority check + Batch 1 together picked fewer than 5.
 Needed = `5 - len(priority_picked) - len(batch1_picked)`.
 
-```
-list_kanban_cards(status="need_human", limit=100, order="edited")
-```
+Filter the **same** merged list from "Candidate list" above (no second
+call) to the entries whose `status` is the board's "Need Human" option, in
+the order returned.
 
-Staleness filter unchanged from before (`last_edited_time` ≥12h ago), same
-newest-first walk — a Need Human card has no in-flight run to gate on, so
-Batch 1's 30-min run-activity gate doesn't apply here.
+Staleness filter unchanged from before (`last_edited_time` ≥12h ago),
+applied straight from the candidate's own `last_edited_time` field — no
+extra fetch needed for it. Walk order is the merged list's own order, not a
+separate newest-first-by-edit-time sort (see "Candidate list" above) — a
+Need Human card has no in-flight run to gate on, so Batch 1's 30-min
+run-activity gate doesn't apply here either way.
 Walk candidates until `needed` of them are **picked** — a candidate is not
 picked until it passes the back-off check below; failing it does not count
 against `needed`. **No run-check here** — a Need Human card by definition
@@ -921,10 +965,11 @@ with.
 For each candidate:
 
 ```
-get_kanban_properties(page_id, properties=["LastSweptAt"])
 get_kanban_card(page_id, include_comments=true)
 ```
 
+The candidate's own `last_swept_at` (already in hand from "Candidate list"
+above — no separate `get_kanban_properties` call) is the back-off stamp.
 The `get_kanban_card` call does double duty: its `comments_md`'s last line
 is both the back-off comparison (see "Back-off — LastSweptAt" above) and,
 once the card passes, the escalation reason — no second read needed. Run
@@ -1468,8 +1513,11 @@ mode this invocation ran — Mode A (name the selector) or Mode B (name the
 feeder, if it told you) — then cover:
 
 * Cards **considered** in each batch (Mode A) or named in the work-order
-  list (Mode B), and the staleness/ordering evidence (`last_edited_time`
-  for each, Mode A only — a Mode B item has no ordering step to report on).
+  list (Mode B), and the ordering evidence — the merged
+  `list_kanban_cards_need_attention` order (priority / `created_time` /
+  `last_swept_at`) for each, Mode A only — a Mode B item has no ordering
+  step to report on. Note the call's own `truncated` flag if it came back
+  true.
 * Mode B **overflow**, if the work-order list was longer than the
   remaining touch budget — the count left unprocessed and that they remain
   eligible next invocation, per "Input contract".
