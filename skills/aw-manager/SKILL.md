@@ -288,12 +288,20 @@ correctness.
 ## Why last_edited_time, not "entered this status at"
 
 There is no Kanban property recording when a card entered its current
-status. `LastSeenAt` is date-only and not it. Staleness here is approximated
-by the card's own `last_edited_time` — the same trade-off
-`kanban_archive_stale.py` in the monolith already accepted. Any comment or
-property write resets that clock, which is a feature, not a bug: your own
-comment at the end of a sweep pass arms a natural 12h cooldown before the
-same card can be picked again.
+status, and `LastSeenAt` is date-only and not it either. For Batch 2 (Need
+Human), where there is no in-flight run to measure against, staleness is
+still approximated by the card's own `last_edited_time` — the same
+trade-off `kanban_archive_stale.py` in the monolith already accepted. Any
+comment or property write resets that clock, which is a feature, not a bug:
+your own comment at the end of a sweep pass arms a natural 12h cooldown
+before the same card can be picked again.
+
+Batch 1 (In Progress) no longer qualifies candidates this way — see "Batch
+1 — stale In Progress" below, qualification there is run-activity-based
+(`STALE_RUN_MINUTES`). `last_edited_time` still orders Batch 1's walk
+(closest-to-touched first), and the comment-resets-the-clock property above
+still matters for `LastSweptAt`'s own back-off check immediately below —
+only the *qualifying* use of edit-time moved to Batch 1's run check.
 
 ---
 
@@ -399,7 +407,8 @@ the AP-MT side — this check is the backstop for if that path, or some future
 equivalent of it, ever breaks the same way again). Run this **before** Batch
 1 and Batch 2, every pass, **regardless of any card's `last_edited_time` or
 `LastSweptAt`** — a card stuck on a failed escalation could be minutes old
-and still needs this now, not at the next 12h-stale pass.
+and still needs this now, not whenever Batch 1's own run-activity gate
+would eventually catch it.
 
 `list_runs` has no server-side filter for `flow_needs_human` — checked the
 MCP tool's actual param list (`category`, `limit`, `notion_task_id`,
@@ -438,7 +447,7 @@ silently widening or narrowing `limit` on your own.
 
 **Back-off — applies here too, deliberately, once a card has been picked by
 this check at least once.** Frederico left this as a judgment call rather
-than a fixed rule: the *first* time a card qualifies, skip the 12h/
+than a fixed rule: the *first* time a card qualifies, skip the staleness/
 `LastSweptAt` gate entirely, per above — but if the Manager already
 corrected this exact card's move on a prior pass and a human still hasn't
 acted on it, re-touching it every single day is pure noise with no new
@@ -626,18 +635,31 @@ in this skill (see "Batch size" below).
 list_kanban_cards(status="running", limit=100, order="edited")
 ```
 
-1. Keep only cards whose `last_edited_time` is **≥12h ago**.
-2. Sort the survivors **newest-first** by `last_edited_time` (closest to
-   the 12h line first, not the oldest zombies — that is deliberate: a card
-   just past the threshold is the one most likely to still have a live,
+Qualifying is run-activity-based, not edit-time-based: a card qualifies when
+no agent/monitor run tied to it has been active in the last
+`STALE_RUN_MINUTES = 30` minutes. `last_edited_time` no longer gates
+qualification here — any comment or property write still resets it, but
+that now only affects the order candidates are tried in, never whether one
+is picked. The 30-min gate itself lives inside the run check's liveness
+probe below, since that probe already fetches the one row (newest run of
+any category) the gate needs — no second lookup.
+
+1. Sort **all** `running` cards **newest-first** by `last_edited_time`
+   (closest-to-touched first, not the oldest zombies — deliberate: a card
+   with more recent activity is the one most likely to still have a live,
    resumable session and a human still paying attention to it).
-3. Walk down that list and, for each candidate, run the **back-off check**
-   first, then the **run check** below — in that order, so a card that's
-   already backed off never costs a `list_runs` call. Take the **first
-   `5 - len(priority_picked)` that pass both** (the Priority check above
-   runs first and may have already spent part of the fixed-5 budget).
-   Fewer passing than that is fine — do not relax the staleness, back-off,
-   or terminal-run rules to fill the quota.
+2. Walk down that list and, for each candidate, run the **back-off check**
+   first, then the **run check** below (which now also carries the 30-min
+   gate) — in that order, so a card that's already backed off never costs a
+   `list_runs` call. Take the **first `5 - len(priority_picked)`** that pass
+   both (the Priority check above runs first and may have already spent
+   part of the fixed-5 budget). Fewer passing than that is fine — do not
+   relax the back-off, 30-min, or terminal-run rules to fill the quota.
+3. **Cap: 25 run-check probes per pass.** Once 25 candidates have reached
+   the run check (i.e. passed back-off), stop walking the list even if the
+   quota isn't filled yet — report that the cap was hit explicitly in the
+   pass report, never silently. A candidate that fails the back-off check
+   doesn't count against this cap, since it never reaches the run check.
 
 ### Back-off check
 
@@ -704,15 +726,35 @@ sub-dispatches since the real deciding session, that session falls outside
 the page and the qa-*-exclusion scan never sees it — **report that case, do
 not silently widen the limit** to work around it.
 
-1. **Liveness probe (unfiltered, call ①):** if the newest row for this card
-   — of *any* category — has `status` `running` or `pending`, **skip, never
-   touch this card.** This preserves today's conservatism even when the
-   live row is a monitor/wrapper dispatch (e.g. a still-running
-   `monitor-shell` watch) rather than the real agent session — a card is not
-   touched while anything tied to it is still in flight, regardless of which
-   dispatch category that is.
+1. **Liveness probe (unfiltered, call ①) — also the 30-min qualifying
+   gate:**
+   * **No rows at all** → qualifies; proceed to call ② (which itself
+     reports "no dispatched run found" if it also finds nothing — see
+     below).
+   * **Newest row has `status` `running` or `pending`** → **skip, never
+     touch this card.** This preserves today's conservatism even when the
+     live row is a monitor/wrapper dispatch (e.g. a still-running
+     `monitor-shell` watch) rather than the real agent session — a card is
+     not touched while anything tied to it is still in flight, regardless
+     of which dispatch category that is.
+   * **Newest row is terminal** (`success`/`error`) — compute its last
+     activity as `ended_at`, falling back to `updated_at` then `created_at`
+     when null (a watchdog-killed row can lack `ended_at`); compare in UTC
+     on both sides.
+     * **≤ `STALE_RUN_MINUTES` (30) minutes ago** → **skip, reason: "recent
+       run activity."** Deliberately stricter than the old 12h gate in one
+       corner: a card edit-stale ≥12h whose run ended 10 minutes ago used
+       to qualify immediately; now it waits out the 30-min window, which
+       avoids interrupting a just-finished handoff.
+     * **> `STALE_RUN_MINUTES` (30) minutes ago** → qualifies; proceed to
+       call ②.
+   * **The probe itself errors** (AP-MT unreachable) → **skip and report,
+     never qualify** — there is no "fall back to edit-time and touch
+     anyway" path; a pass with AP-MT down reports zero Batch 1 candidates
+     for the cards it couldn't probe, and says why.
 2. **The pinned lookup (`category="work"`, call ②)** — only reached once
-   call ① confirmed nothing non-terminal is in flight. Pre-existing Run rows
+   call ① confirmed nothing non-terminal is in flight and the 30-min gate
+   passed. Pre-existing Run rows
    from before this column existed are backfilled to `"work"` by the
    migration itself (a DDL-level `ALTER TABLE ... DEFAULT 'work'`, not an
    ORM-only default) — they never read as null/unset, so no older real
@@ -746,7 +788,7 @@ nothing — that would reintroduce the exact unreliable path this replaces.
 ```
 invoke_kanban_agent(page_id, run_id=<id of the qualifying run from the run check>, message="""
 Your card <page_id> is still In Progress although your run finished
-<N>h ago. Re-read the card and your own final report. If the work you
+<N> ago. Re-read the card and your own final report. If the work you
 already did and reported is genuinely complete, call mark_flow_done with
 the honest outcome (QA accountability applies: an existing qa-* run
 auto-resolves; pass qa_not_needed=true only if the work was verified); if
@@ -762,8 +804,11 @@ would have picked without it. This is what actually lands the resume on the
 real deciding session instead of a `qa-*` review or a narrow sub-dispatch
 that happens to be newer.
 
-`<N>` = hours since that run's own finish time (the `ended_at` on the row the
-run check already carried forward), not since `last_edited_time`.
+`<N>` = elapsed time since that run's own finish time (the `ended_at` on the
+row the run check already carried forward, same value the 30-min gate
+used), not since `last_edited_time` — formatted as minutes when under an
+hour (e.g. "42 min") and hours otherwise (e.g. "6h"), since the gate can now
+qualify a run as little as `STALE_RUN_MINUTES` (30) minutes old.
 
 * **`invoke_kanban_agent` succeeds** (resumed a real session) → that is the
   action, and its JSON result carries a `run_id` for the dispatched turn.
@@ -845,10 +890,13 @@ below. If `register_callback` itself fails after the comment already
 posted, report it and move on, the card just stays eligible next run,
 the safe direction, same as a failed stamp write used to be.
 
-The comment is both the audit trail and the cooldown — it resets
-`last_edited_time` so this card won't be picked again for 12h even if
-nothing else changes; the stamp (whenever it lands) is the separate, new
-back-off clock on top of it.
+The comment is the audit trail; it still resets `last_edited_time`, but
+that no longer by itself buys a cooldown here — Batch 1 doesn't gate on
+edit-time. The real near-term protection is the dispatch itself: the new
+run is non-terminal (or freshly terminal) by the time of the next pass, so
+the liveness probe's non-terminal skip or the 30-min "recent run activity"
+skip covers it; the `LastSweptAt` stamp (whenever it lands) is the
+longer-lived back-off clock on top of that.
 
 ---
 
@@ -861,7 +909,9 @@ Needed = `5 - len(priority_picked) - len(batch1_picked)`.
 list_kanban_cards(status="need_human", limit=100, order="edited")
 ```
 
-Same staleness filter (`last_edited_time` ≥12h ago), same newest-first walk.
+Staleness filter unchanged from before (`last_edited_time` ≥12h ago), same
+newest-first walk — a Need Human card has no in-flight run to gate on, so
+Batch 1's 30-min run-activity gate doesn't apply here.
 Walk candidates until `needed` of them are **picked** — a candidate is not
 picked until it passes the back-off check below; failing it does not count
 against `needed`. **No run-check here** — a Need Human card by definition
