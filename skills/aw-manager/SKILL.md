@@ -632,10 +632,23 @@ steps:
    among these.
 2. **Then longest-stuck-first across BOTH signals, one merged ordering** —
    no class precedence. Each survivor's "stuck since" instant is: Signal A →
-   the qualifying row's `ended_at`; Signal B → `last_swept_at` if set, else
-   the card's `last_edited_time` (the best available proxy for when the
-   verdict stopped being acted on). Sort ascending and fill the remaining
-   slots.
+   the qualifying row's `ended_at`; Signal B → the card's `created_time`.
+   Sort ascending and fill the remaining slots. Break a near-tie among
+   Signal-B survivors with the higher `SweepBlock` count first — more
+   recorded failed attempts is more stuck.
+
+   **`created_time`, specifically, and not a timestamp that looks more
+   relevant.** Signal B's condition (a verdict recorded, the Status never
+   moved) carries no timestamp of its own, and every other date on the card
+   is **written or bumped by the Manager's own touches**: `LastSweptAt` is
+   re-stamped inline on every qualifying action, including one whose move
+   failed; `last_edited_time` moves with the `🧹` comment; `SweepBlock`'s
+   `last_attempt` is rewritten each hit. Use any of them and a card behind a
+   persistent wall reads as freshly handled on every single pass — it sorts
+   last forever, which is the precise opposite of the intent, for exactly
+   the cards this check exists to rescue. `created_time` is the only instant
+   here the Manager cannot move. (Caught in review on this PR; the first fix
+   for the ordering bug above used `last_swept_at` and had this hole.)
 
 Do **not** rank every Signal B ahead of every Signal A. Signal B has no
 minimum dwell time — it is exempt from the back-off and qualifies the
