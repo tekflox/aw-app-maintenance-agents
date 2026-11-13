@@ -633,9 +633,13 @@ steps:
 2. **Then longest-stuck-first across BOTH signals, one merged ordering** —
    no class precedence. Each survivor's "stuck since" instant is: Signal A →
    the qualifying row's `ended_at`; Signal B → the card's `created_time`.
-   Sort ascending and fill the remaining slots. Break a near-tie among
-   Signal-B survivors with the higher `SweepBlock` count first — more
-   recorded failed attempts is more stuck.
+   Sort ascending and fill the remaining slots. Where two Signal-B
+   survivors' `created_time` values are **within 1h of each other**, the
+   higher `SweepBlock` count goes first instead — more recorded failed
+   attempts is more stuck. 1h, stated rather than left to judgement: these
+   are multi-day staleness decisions, so an hour's difference in card age
+   carries no signal, while "this one has hit the same wall four times"
+   does.
 
    **`created_time`, specifically, and not a timestamp that looks more
    relevant.** Signal B's condition (a verdict recorded, the Status never
