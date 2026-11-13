@@ -692,9 +692,16 @@ Read it top-down: the first row is checked **before** the four destinations,
 because a card whose blocker no longer exists should not be routed to
 anybody new at all.
 
+**The first row is checked at most once per touch.** If it matches but the
+resume cannot be made — call ② finds no qualifying run (`no-work-run`) —
+the row is **spent**: re-evaluate the matrix from the second row down and
+pick a destination, never re-match row 1. Its condition stays true no
+matter how many times you read it, so a second match would loop straight
+back into the same failed resume.
+
 | Signal | Route to |
 |---|---|
-| **Stated blocker verifiably no longer true** — an `UnblockProbe` evaluated TRUE, or Layer B's bounded verification showed the latest comment's stated reason is resolved | **resume the original agent** with the evidence — see "Premise-resolved action" below. Not a Manager verdict and not one of the four destinations: the resumed agent has the context, decides completeness, and moves the card; the Manager leaves it in Need Human |
+| **Stated blocker verifiably no longer true** — an `UnblockProbe` evaluated TRUE, or Layer B's bounded verification showed the latest comment's stated reason is resolved. Checked **once per touch**; spent if the resume has no target (see above) | **resume the original agent** with the evidence — see "Premise-resolved action" below. Not a Manager verdict and not one of the four destinations: the resumed agent has the context, decides completeness, and moves the card; the Manager leaves it in Need Human |
 | Pinned work run ended `error`, or QA verdict = failed/bounced on implementation grounds | coder (1) |
 | Latest comments raise a design/approach question, or QA bounced on architecture | architect (2) |
 | Scope/priority/mootness question, conflicting asks | product-owner (3) |
@@ -1884,6 +1891,15 @@ qualifying run>, message=...)`, falling back to
 refuses. If call ② returns nothing (`no-work-run`), there is no original
 agent to hand this back to — record that wall as usual and fall through to
 the ordinary routing matrix instead; never invent a dispatch target.
+
+**Row 1 is spent once you get here.** Falling through means evaluating the
+matrix **from its second row down** — do not re-match the first row on the
+way back out. Row 1's condition (the premise is resolved) is still true and
+will stay true, so re-matching it would send you straight back into this
+section, call ② again, and get the same `no-work-run`: a loop. The premise
+being resolved is exactly what you just tried to act on and couldn't; what
+is left to decide is which of the four destinations the card now needs,
+which is what the rows below answer.
 
 The resume message MUST carry the evidence, the ask, and the re-escalation
 instruction:
