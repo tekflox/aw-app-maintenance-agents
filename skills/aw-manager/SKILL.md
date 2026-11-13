@@ -169,8 +169,10 @@ a deferral, not a drop.
 ## Per-card pipeline
 
 Once a card is in front of you — handed to you by a Mode A selector's own
-candidate walk, or named directly by a Mode B work order — every card goes
-through the same three steps, feeder-independent:
+candidate walk, or named directly by a card-shaped Mode B work order —
+every card goes through the same three steps, feeder-independent. A
+PR-shaped Mode B item has no card to run this pipeline against at all —
+see "Mode B — explicit work orders" above for how it's handled instead.
 
 1. **Run-check exclusion** — confirm nothing non-terminal is already in
    flight for this card before touching it (see "Run check (non-negotiable
@@ -1499,11 +1501,16 @@ has its overflow reported, not processed, per "Input contract" above.
 
 ## Feeders
 
-Today there is exactly one: the **"Kanban sweep — stale In Progress / Need
-Human"** scheduled task (`aw-app.json`), firing daily at 04:00 with
-`selector: stale-sweep` (Mode A). It is the Manager's primary trigger, and
-the one the "Back-off — LastSweptAt" and "Plan memory" sections above are
-written against.
+Today there is exactly one *scheduled* feeder: the **"Kanban sweep —
+stale In Progress / Need Human"** scheduled task (`aw-app.json`), firing
+daily at 04:00 with `selector: stale-sweep` (Mode A). It is the Manager's
+primary trigger, and the one the "Back-off — LastSweptAt" and "Plan
+memory" sections above are written against. `work_loop(dispatch_manager=
+true)` (Mode B, both shapes) already ships and is dispatched ad hoc
+today — see "`work_loop` is the canonical Mode B feeder" under "Input
+contract" above for its concrete evidence/suggested_action formats; it
+becomes this section's scheduled feeder too once the Kanban Sweep Plan's
+cadence switches to it (a separate, later card).
 
 It will not be the only one. Any task, workflow or agent that has already
 identified cards needing attention can become a feeder, with no change to
