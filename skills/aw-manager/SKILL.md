@@ -176,15 +176,23 @@ see "Mode B — explicit work orders" above for how it's handled instead.
 
 1. **Run-check exclusion** — confirm nothing non-terminal is already in
    flight for this card before touching it (see "Run check (non-negotiable
-   exclusion)" under Batch 1 below for the concrete two-call mechanism; a
-   Need Human card has no in-flight run by definition, so Batch 2 and a
-   Mode B item pointing at a Need Human card skip this trivially rather than
-   re-deriving it).
-2. **Routing matrix** — the four named actions (dispatch to coder, ask
+   exclusion)" under Batch 1 below for the concrete two-call mechanism). A
+   Need Human card used to be exempt here, on the grounds that it has no
+   in-flight run by definition — **no longer true**: premise revalidation
+   (step 2) dispatches resumes onto Need Human cards, so one can be carrying
+   a live run from an earlier pass. Batch 2 and a Mode B item pointing at a
+   Need Human card run call ① (the cheap unfiltered liveness probe) as a
+   TOCTOU guard; only call ② stays Batch-1-specific.
+2. **Premise revalidation** (Need Human cards only) — is the stated
+   blocker still true? Layer A (`UnblockProbe`) runs **before** the
+   back-off check; Layer B (bounded judgement, ≤3 read-only calls) runs on
+   a picked card **before** the routing matrix. A resolved premise resumes
+   the agent that escalated — see "UnblockProbe — premise probes" below.
+3. **Routing matrix** — the four named actions (dispatch to coder, ask
    architect, ask product-owner, or `ask_human` + need_human) — see
    "Routing matrix" below. Shared by Mode A's Batch 1/Batch 2 and by every
    Mode B item alike.
-3. **Touch discipline** — `LastSweptAt` back-off, the `SweepBlock` Update
+4. **Touch discipline** — `LastSweptAt` back-off, the `SweepBlock` Update
    rule and its N=3 escalation backstop, and naming the action taken in a
    `🧹 manager:` comment — see "Back-off — LastSweptAt", "SweepBlock —
    repeat-wall detection and escalation", and "Deferred stamp" below. Same
@@ -240,6 +248,7 @@ ext["kanban-sweeper"] = {
     "moved_done": "card moved to Done",
     "archived_not_needed": "card archived as moot, not completeness",
     "resumed": "original session resumed via invoke_kanban_agent",
+    "unblock_resumed": "stated Need-Human blocker verified no longer true; original session resumed to decide",
     "routed": "routed to a named actor per the routing matrix (see item.to: coder/architect/product-owner/human)",
     "backed_off": "skipped: LastSweptAt back-off still in effect",
     "skipped_active_run": "skipped: a non-terminal run is in flight",
@@ -567,7 +576,13 @@ A touch that makes no progress on a card no longer terminates in a passive,
 comment-only "flagging for a human" note — that outcome class is
 **abolished**. Every stale no-progress touch (Batch 1, Batch 2, or a
 Deferred-stamp wake-up) that cannot cleanly resume-and-conclude must end in
-exactly one of four named actions, and the `🧹` comment states which:
+exactly one of four named actions, and the `🧹` comment states which.
+
+(One touch on a Need Human card ends in neither a named destination nor a
+passive note: a **premise-resolved resume**, which hands the card back to
+the agent that escalated it rather than routing it onward. It is the first
+row of the signals table below — still an action, still named in the `🧹`
+comment, still one touch against the budget.)
 
 1. **"➡️ Dispatching back to coder"** — the stuck-ness looks like it needs
    more implementation work.
@@ -639,6 +654,18 @@ exactly one of four named actions, and the `🧹` comment states which:
    also what **arms** the deterministic 12h human re-ping, so writing it is
    not optional bookkeeping (see "The 12h re-ping gate" below).
 
+   **Writer duty — also write `UnblockProbe` when the blocker is
+   mechanically checkable.** Before leaving the card, ask: is what this
+   human is being asked to unblock one of the three probe kinds (a PR
+   merging, a run finishing, another card reaching a status)? If yes, write
+   it — `set_kanban_property(page_id, "UnblockProbe",
+   "<kind>|<arg>|<now_iso>|<the blocker in plain words>")` — so a later
+   pass can notice the premise resolved without anyone commenting. See
+   "UnblockProbe — premise probes" below for the vocabulary and the arg
+   shapes. If the blocker is a genuine human judgement call (most of this
+   allowlist is), there is no probe to write and that is the normal case:
+   write nothing rather than inventing an approximation.
+
 Destinations 1-3 each produce a running work run on the card — the existing
 liveness probe makes the card untouchable next sweep until that run ends,
 and its eventual reply re-arms `LastSweptAt`'s back-off naturally, same as
@@ -655,13 +682,19 @@ below.
 The Manager never judges whether the work is complete (Rule 1 is
 unchanged) — routing only picks the next **actor**, using signals it
 already has: the pinned work run's status/`source_slug`, the `QAStatus`
-property, and the latest comments. This table is the shared matrix used by
-**both** Batch 1 (routing an interpretable SweepBlock wall) and Batch 2
-(routing a Need Human card) — it supersedes Batch 2's previous
-PO-vs-architect-only table.
+property, the latest comments, and — on a Need Human card — whether the
+stated blocker is still true (see "UnblockProbe — premise probes" below).
+This table is the shared matrix used by **both** Batch 1 (routing an
+interpretable SweepBlock wall) and Batch 2 (routing a Need Human card) — it
+supersedes Batch 2's previous PO-vs-architect-only table.
+
+Read it top-down: the first row is checked **before** the four destinations,
+because a card whose blocker no longer exists should not be routed to
+anybody new at all.
 
 | Signal | Route to |
 |---|---|
+| **Stated blocker verifiably no longer true** — an `UnblockProbe` evaluated TRUE, or Layer B's bounded verification showed the latest comment's stated reason is resolved | **resume the original agent** with the evidence — see "Premise-resolved action" below. Not a Manager verdict and not one of the four destinations: the resumed agent has the context, decides completeness, and moves the card; the Manager leaves it in Need Human |
 | Pinned work run ended `error`, or QA verdict = failed/bounced on implementation grounds | coder (1) |
 | Latest comments raise a design/approach question, or QA bounced on architecture | architect (2) |
 | Scope/priority/mootness question, conflicting asks | product-owner (3) |
@@ -1045,34 +1078,115 @@ the order returned.
 Staleness filter unchanged from before (`last_edited_time` ≥12h ago),
 applied straight from the candidate's own `last_edited_time` field — no
 extra fetch needed for it. Walk order is the merged list's own order, not a
-separate newest-first-by-edit-time sort (see "Candidate list" above) — a
-Need Human card has no in-flight run to gate on, so Batch 1's 30-min
-run-activity gate doesn't apply here either way.
-Walk candidates until `needed` of them are **picked** — a candidate is not
-picked until it passes the back-off check below; failing it does not count
-against `needed`. **No run-check here** — a Need Human card by definition
-has nobody actively working it, so there is no in-flight run to collide
-with.
+separate newest-first-by-edit-time sort (see "Candidate list" above).
+Batch 1's 30-min run-activity gate still doesn't apply here — it qualifies
+*stale In Progress* candidates, and a Need Human card's eligibility comes
+from the 12h edit-time filter instead.
 
-For each candidate:
+Walk candidates until `needed` of them are **picked**. A candidate is picked
+once it either clears the back-off check below **or** has an `UnblockProbe`
+that evaluates TRUE (which overrides back-off — see Layer A below); a
+candidate skipped by the liveness probe or by back-off is not picked and
+does not count against `needed`.
+
+**Liveness probe — now required here too.** This section used to state that
+a Need Human card has no in-flight run by definition and skip the run check
+entirely. **That assumption is false as of premise revalidation** (see
+"UnblockProbe — premise probes" below): this skill now dispatches resumes
+onto Need Human cards, so a card picked today can still be carrying the run
+a previous pass started. Run Batch 1's **call ①** — the cheap unfiltered
+liveness probe — on every Need Human candidate that reaches this point:
 
 ```
+list_runs(notion_task_id=page_id, limit=1)       # call ①, liveness only
+```
+
+Newest row `running`/`pending` → **skip, never touch this card**, same
+non-negotiable rule and same reported reason as Batch 1. No rows, or a
+terminal newest row → proceed. The **30-min "recent run activity" gate does
+not apply here** — that gate exists to avoid interrupting a just-finished
+In Progress handoff; a Need Human card already passed a 12h staleness
+filter. The probe erroring (AP-MT unreachable) → skip and report, never
+qualify, same as Batch 1. Call ② (the pinned `category="work"` lookup) is
+reached only if this candidate goes on to need a resume target — see
+"Premise-resolved action" — and is skipped otherwise, since the ordinary
+Batch 2 routing destinations dispatch a fresh run rather than resuming one.
+
+For each candidate that survives the liveness probe:
+
+```
+get_kanban_properties(page_id, properties=["UnblockProbe", "SweepBlock"])
 get_kanban_card(page_id, include_comments=true)
 ```
 
-The candidate's own `last_swept_at` (already in hand from "Candidate list"
-above — no separate `get_kanban_properties` call) is the back-off stamp.
+**Layer A — evaluate `UnblockProbe` first, before the back-off check.** See
+"Evaluating a probe" in the UnblockProbe section below for the full rule;
+in short: TRUE → take "Premise-resolved action" (it overrides the back-off
+check, because a premise resolved externally leaves no comment for back-off
+to see); FALSE → the blocker is confirmed, skip Layer B for this card and
+continue with the back-off check as normal; absent or unevaluable → fall
+through to Layer B. Probe evaluations are capped at 10 per pass.
+
+The candidate's own `last_swept_at` is the back-off stamp — already in hand
+from "Candidate list" above, so the property read just above fetches only
+`UnblockProbe`/`SweepBlock`, never `LastSweptAt`.
 The `get_kanban_card` call does double duty: its `comments_md`'s last line
 is both the back-off comparison (see "Back-off — LastSweptAt" above) and,
 once the card passes, the escalation reason — no second read needed. Run
-the back-off check first; a candidate that fails it is **skipped**, reported
-the same way as in Batch 1, and the card is left untouched.
+the back-off check after Layer A; a candidate that fails it is **skipped**,
+reported the same way as in Batch 1, and the card is left untouched.
 
 Once a candidate passes back-off, it is picked. Read **only the most recent
 comment** — that is the escalation reason. Some of these cards carry 150K+
 chars of comment history; do not read the whole thing, slice the tail. (See
 the `aw-autoskill-huge-kanban-card-comments` skill if the response needs that
 treatment.)
+
+### Layer B — bounded premise judgement (picked card, before the routing matrix)
+
+A card with no usable probe still has a stated blocking reason in that
+latest comment. Before routing it, decide whether that reason is **still
+true** — because re-pinging a human, or dispatching an architect, on a
+premise that resolved hours ago is the exact waste this card exists to stop.
+
+Skip this step entirely when Layer A already answered: a **FALSE** probe is
+authoritative (the blocker is confirmed present — do not second-guess hard
+evidence with judgement), and a **TRUE** probe has already taken the
+premise-resolved action.
+
+Otherwise, from the latest comment's stated reason, spend **at most 3
+read-only verification calls** on that one card. Nothing else is permitted —
+no writes, no dispatches, no speculative fan-out:
+
+* `gh pr view <N> --repo <owner>/<repo> --json state,mergedAt` — for a
+  comment blocking on a named PR. Merged → resolved; open or closed-unmerged
+  → still true.
+* `get_run(<run_id>)` / `list_runs(notion_task_id=..., limit=...)` — for a
+  comment blocking on a named run finishing.
+* `get_kanban_properties(<other_page_id>, properties=["Status"])` — for a
+  comment blocking on another card landing.
+* The card's own newer comments (already in hand from the
+  `get_kanban_card` above — free, costs none of the 3) — someone may have
+  said the blocker is gone without moving the card.
+
+Three outcomes:
+
+* **Resolved** — a verification call affirmatively shows the stated blocker
+  no longer holds. Take "Premise-resolved action" below; the evidence in the
+  comment is the call and what it returned.
+* **Still true** — the blocker verifiably holds. Continue to the routing
+  matrix exactly as today.
+* **Unverifiable** — the reason names nothing checkable ("needs Frederico's
+  judgement"), the 3-call budget ran out, or a call errored. **Fall through
+  to today's behavior unchanged** and note it in the report as unverifiable,
+  with what was tried. Unverifiable is never "resolved"; when in doubt the
+  blocker stands.
+
+Same judgement discipline as everywhere else in this skill: this decides
+whether a **premise** still holds, never whether the **work** is complete.
+A resolved premise hands the card back to the agent that escalated it — it
+does not move the card, and it does not let the Manager conclude anything
+about the work.
 
 Decide **fresh, every time — never hardcoded** which of the four named
 actions the latest comment calls for, using the shared "Routing matrix"
@@ -1083,9 +1197,9 @@ own paragraph right after:
 
 ```
 run_agent_async(
-  slug=<the card's AgentSlug (coder route — Batch 2 does no run-check, so
-        there is no pinned run's source_slug to prefer here) | "architect" |
-        "product-owner", per the matrix above>,
+  slug=<the card's AgentSlug (coder route — Batch 2 runs only call ①, the
+        liveness probe, so no pinned run's source_slug has been resolved to
+        prefer here) | "architect" | "product-owner", per the matrix above>,
   input=f"{page_id}\n\n{escalation_comment}\n\ndecide and route; move the card when you have",
   notion_task_id=page_id,
   call_me_back=false,
@@ -1114,8 +1228,11 @@ there with nobody actually pinged, exactly the Nov 5-6 screenshot failure
 mode. There is nothing to dispatch and no status move needed (it's already
 `need_human`) — `ask_human(question=...)` with the evidence, comment
 naming "🙋 Sent to Need Human", write `SweepBlock` as
-`routed-human|1|<iso>|<detail>`, and stamp `LastSweptAt` **inline**, same
-as the no-dispatch case in Batch 1.
+`routed-human|1|<iso>|<detail>`, **and write `UnblockProbe` if the blocker
+is mechanically checkable** (the same writer duty destination 4 carries in
+the "Routing matrix" above — a PR merging, a run finishing, another card
+landing; nothing to write otherwise), then stamp `LastSweptAt` **inline**,
+same as the no-dispatch case in Batch 1.
 
 **Ambiguous** (Batch 2 has no live run to fall back on resuming, unlike
 Batch 1) → default to `architect`, as the closest generalist call among
@@ -1344,7 +1461,7 @@ never touches `SweepBlock`.
 | `wall_key` | Fires when |
 |---|---|
 | `qa-dedup-409` | `invoke_kanban_agent` (Batch 1, "Acting on a qualifying card") returns the server's QA-dedup guard 409 — a QA run already exists for this card, and the guard also fires on a resume, not only on a fresh dispatch. |
-| `no-work-run` | The run check's call ② (`list_runs(notion_task_id=page_id, category="work", limit=1)`, Batch 1) returns no row. |
+| `no-work-run` | The run check's call ② (`list_runs(notion_task_id=page_id, category="work", ...)`) returns no row — in Batch 1, or in the call ② a premise-resolved resume makes to find its target (see "UnblockProbe — premise probes" below). |
 | `no-session` | `invoke_kanban_agent` fails explainably (most commonly: no `session_id` on the pinned run) **and** the `run_agent_async` fallback also fails. |
 | `resume-transport` | `invoke_kanban_agent` or its fallback dies with the zero-token/no-LLM-turn transport-failure signature (see the `aw-autoskill-kanban-sweeper-resume-transport-failures` skill) and the retry/fallback protocol there is exhausted with no successful dispatch. |
 | `resume-ineffective:<session8>` | At the deferred wake-up ("Deferred stamp" above), the dispatched run (resume, fallback, or a Batch 2 route) is terminal with `error`, or terminal with `success` but left no new comment on the card. `<detail>` = the first 8 characters of that run's own `session_id`. |
@@ -1392,6 +1509,14 @@ extra to extend) and:
   stamp (same check "Deferred stamp" already does for `LastSweptAt`) →
   **clear** `SweepBlock` (write empty string). A clean touch or a status
   change both mean whatever this property was tracking no longer applies.
+* **A premise-resolved resume fires** (see "UnblockProbe — premise probes"
+  below) → **clear** `SweepBlock` **and** `UnblockProbe`, inline at
+  dispatch. This is the one clearing path that is neither a clean touch nor
+  a status change: the evidence falsified the marker's own premise ("only a
+  human can act here"), so it must not keep arming a reminder. It overrides
+  the `routed-human` and `escalated` no-op branches above — those say no
+  *wall outcome* re-pings or re-escalates a card, not that a marker can
+  never be cleared.
 
 `resume-ineffective` is the one wall that can only be known at the
 wake-up — it is written there, in the same turn as the deferred
@@ -1443,7 +1568,18 @@ both and do not also route.
    this card").
 3. Write `SweepBlock` as `<wall_key>|escalated|<iso>|<detail>`. An
    `escalated` marker never re-escalates on its own — it clears only via
-   the Update rule's status-change path above, same as any other value.
+   the Update rule's status-change path above, or via a premise-resolved
+   resume (see "UnblockProbe — premise probes" below), same as any other
+   value.
+4. **Writer duty — also write `UnblockProbe` when what the human is being
+   asked to unblock is mechanically checkable** (a PR merging, a run
+   finishing, another card reaching a status):
+   `set_kanban_property(page_id, "UnblockProbe",
+   "<kind>|<arg>|<now_iso>|<the blocker in plain words>")`. Same duty
+   destination 4 carries, for the same reason: without a probe, an
+   externally-resolved blocker leaves no trace and the card sits escalated
+   forever. Most third-rule escalations are platform/triage walls with no
+   checkable condition — write nothing then rather than approximating one.
 
 **b) Additionally**, only for platform-shaped walls — a bug in the platform
 itself, not something only Frederico can decide — file or bump a dedup'd
@@ -1518,7 +1654,7 @@ matrix destination 4** and by **the third rule** above, the two places an
 agent concluded only a human can act. Everything else is left to the
 routing matrix, which tries coder/architect/PO first.
 
-Three consequences for how this skill is followed, none of them new work:
+Four consequences for how this skill is followed:
 
 * **Writing the marker is what arms the reminder.** Destination 4's
   `routed-human|1|<iso>|<detail>` and the third rule's
@@ -1534,10 +1670,274 @@ Three consequences for how this skill is followed, none of them new work:
   it. Past 48h with no edit at all it pings anyway, flagged
   `(unrouted ≥48h — fail-open)`, and in the meantime every suppressed card
   is named in the tool's own `reping.deferred_unrouted` report.
+* **A premise-resolved resume is a second, deliberate disarm** — the one
+  genuinely new item here. It clears `SweepBlock` (and `UnblockProbe`)
+  **inline at dispatch**, outside the Update rule's clean-touch and
+  status-change branches, so the reminder stops firing for that card. That
+  is the intent, not a leak: the marker's premise is "only a human can act
+  here," and a TRUE probe (or a Layer B verification) is evidence that
+  premise is false. The resume message instructs the resumed agent to
+  re-escalate and re-write both markers if it disagrees, which re-arms the
+  reminder; if it never does, the 48h fail-open above is the remaining net.
+  Accepted cost — one extra agent lap beats one stale human ping. See
+  "UnblockProbe — premise probes" below.
 
 A malformed `SweepBlock` reads as absent on that side too, the same rule
 "The property" states above — so the parse discipline there now also
-decides whether a human hears about the card.
+decides whether a human hears about the card. The same is true of
+`UnblockProbe` on this skill's own side: malformed reads as absent, and an
+absent probe is what makes a card fall through to Layer B rather than
+staying silently unexamined.
+
+---
+
+## UnblockProbe — premise probes
+
+`SweepBlock` records that the Manager could not route a card. `UnblockProbe`
+records the opposite thing: **the condition that would make a Need Human
+card routable again**, written down by whoever escalated it, in a shape a
+later pass can mechanically check.
+
+It exists because external resolution leaves no trace on the card. A card
+escalated with "blocked until core is restarted" stays in Need Human forever
+after someone restarts core — nothing comments, `last_edited_time` never
+moves, and the back-off check (which only re-arms on a *new comment*) keeps
+skipping it. That is exactly how card 4175bf3b-9510-8163 (the `work_loop`
+"prs" loop) sat stuck after its blocker was already resolved, until a human
+noticed by hand. A probe turns that invisible external event into something
+a sweep pass can read.
+
+Two layers answer the same question — "is the stated blocker still true?" —
+and both resolve to the same single action:
+
+* **Layer A — `UnblockProbe`**, this section: a structured, mechanically
+  checkable probe, evaluated on every Need Human touch **before** the
+  back-off check.
+* **Layer B — bounded judgement**, for a card carrying no usable probe:
+  read the latest comment's stated reason and spend at most 3 read-only
+  verification calls deciding whether it still holds. See "Layer B —
+  bounded premise judgement" under Batch 2 above.
+
+Both end at "Premise-resolved action" below, which resumes the original
+agent and never decides the card itself.
+
+### The property
+
+`UnblockProbe` is a Notion `rich_text` property, same family and the **same
+parse discipline** as `SweepBlock`. One line, four pipe-separated fields:
+
+```
+<kind>|<arg>|<set_iso8601>|<detail>
+```
+
+e.g. `pr-merged|tekflox/aw-app-notion#14|2026-11-13T15:40:00+00:00|blocked until the reping gate ships`.
+
+`<set_iso8601>` is when the probe was written (context for the comment and
+for judging a stale probe; it gates nothing on its own). `<detail>` is free
+text naming the human-readable blocker the probe stands for — it exists for
+the comment the Manager writes later, and is **never** used to decide
+anything and **never** passed to any tool.
+
+Split on the **first three** `|` only; `<detail>` is everything after the
+third, pipes included. The three fields that actually drive a decision are
+all pipe-free by their own shape rules below, so a sentence with a pipe in
+it must not read as a malformed probe.
+
+Read/write it exactly like `SweepBlock`: `get_kanban_properties(page_id,
+properties=["UnblockProbe"])` to read, `set_kanban_property(page_id,
+"UnblockProbe", <value>)` to write — `rich_text` already round-trips
+end-to-end (`repos/aw-app-notion/notion_app/kanban/client.py:359-360` write,
+`:377-378` read), no app change needed.
+
+A value that fails to parse — wrong field count, unknown `<kind>`, or an
+`<arg>` that fails its kind's shape check below — is treated as **absent**,
+exactly like a malformed `SweepBlock`: no probe, fall through to Layer B.
+Never abort the card or the pass over a malformed probe, and never "clean
+up" a near-miss into something that parses.
+
+**One-time provisioning, not automatic:** `UnblockProbe` must exist as a
+`rich_text` property on the board's Notion database before any of this can
+do anything — the same manual one-time schema add `LastSweptAt` and
+`SweepBlock` each needed. Confirm it round-trips with
+`get_kanban_properties(page_id, properties=["UnblockProbe"])` on a scratch
+card before relying on it; until that property exists, every write here
+fails and Layer A is a no-op (Layer B, which reads no property, still
+works).
+
+**An unprovisioned property reads as absent, not as an error.**
+`get_kanban_properties` silently **omits** a key the board's schema doesn't
+have — verified live on 2026-11-13: asking for
+`["UnblockProbe", "SweepBlock", "LastSweptAt"]` before provisioning came
+back `{"LastSweptAt": null, "SweepBlock": ""}`, with no `UnblockProbe` key
+and no error. So "no probe" and "the property doesn't exist yet" look
+identical from here, and both correctly fall through to Layer B. Do not
+read a missing key as a failure worth reporting as a wall; do report it
+once per pass if **every** card is missing it, since that is the signal
+provisioning never happened.
+
+### The probe kinds — closed vocabulary, read-only, shape-validated
+
+Exactly these three `<kind>` values. Nothing else is a probe: a `<kind>`
+outside this table makes the whole value malformed, i.e. absent.
+
+| `<kind>` | `<arg>` shape | TRUE when | FALSE when |
+|---|---|---|---|
+| `pr-merged` | `owner/repo#N` | `gh` reports the PR's `state` is exactly `MERGED` | any other state — **including `CLOSED`**: a PR closed unmerged is not a resolved premise, it is usually the opposite |
+| `run-terminal` | a canonical 32-char hex run id | `get_run(<id>)` shows a terminal `status` (`success` or `error`) | `running`, `pending`, or anything else non-terminal |
+| `card-status` | `<page_id>:<status_key>` | that **other** card's `Status` has reached the named status | it has not |
+
+* **`pr-merged`** — `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+$`. Evaluate
+  with `gh pr view <N> --repo <owner>/<repo> --json state` and compare the
+  `state` field to the literal `MERGED`. `MERGED` only — do not accept
+  `CLOSED`, and do not substitute `gh pr checks`/`mergeStateStatus` for it.
+* **`run-terminal`** — `^[0-9a-f]{32}$`. Evaluate with `get_run(run_id=...)`
+  and check `status` against the same terminal set the run check uses
+  (`success`/`error`). Nothing else counts as terminal here.
+* **`card-status`** — `^[0-9a-fA-F-]{32,36}:[a-z_]+$`. Evaluate with
+  `get_kanban_properties(<page_id>, properties=["Status"])` on that card and
+  compare against the Notion option label for the named logical key, per
+  `repos/aw-app-notion/notion_app/kanban/config.py`'s `DEFAULT_STATUSES`
+  (`done` → `"Done"`, `need_human` → `"Need Human"`, …) — the same map
+  "Deferred stamp" above already cites. A `<status_key>` not in that map
+  makes the arg malformed. The referenced card being the card under
+  evaluation is also malformed — a card cannot be its own premise.
+
+**Shape-validate `<arg>` before any tool call, and never interpolate it into
+a shell string.** `UnblockProbe` is a board property any agent (and any
+human with board access) can write, and evaluating it makes the Manager run
+a tool with its contents — an injection channel unless the arg is validated
+first. Non-negotiable:
+
+1. Match `<arg>` against its kind's anchored regex **in full**. No match →
+   malformed → absent. There is no partial acceptance and no repair.
+2. Pass the validated pieces as **separate arguments**, never by building a
+   shell command string out of the raw property text. The `--repo` form
+   above is chosen for exactly that reason: it keeps `owner/repo` and `N` in
+   their own argv slots and leaves nothing shell-interpretable. Do not wrap
+   a probe evaluation in `bash -c`, do not pipe the raw value into anything,
+   and do not pass `<detail>` to any command at all.
+3. **Only** the three read-only lookups above are permitted. A probe never
+   writes, merges, dispatches, or runs anything else. "What command to run"
+   is deliberately not a field this property has — an open-ended
+   "run this tool and check the output" probe was considered and rejected as
+   an injection channel. Every new blocker shape costs an edit to this
+   table; that is the deliberate price of the closed vocabulary.
+
+### Evaluating a probe — every Need Human touch, before the back-off check
+
+On every Need Human candidate (Batch 2, or a Mode B work order pointing at a
+Need Human card), read `UnblockProbe` **before** the back-off check. The
+ordering is the whole point: a resolved premise leaves no comment, so the
+back-off check would keep skipping the card forever waiting for one. The
+read costs nothing extra — extend the `get_kanban_properties` call that step
+already makes.
+
+* **Absent, or malformed (→ absent)** → fall through to Layer B.
+* **TRUE** → the stated blocker is verifiably gone. This **overrides the
+  back-off check** — do not skip the card for "no comment since last swept."
+  Take "Premise-resolved action" below.
+* **FALSE** → the blocker is confirmed still present, on hard evidence. The
+  probe is **authoritative**: skip Layer B entirely for this card — its
+  author named exactly what would unblock it and that has not happened, so a
+  judgement pass could only second-guess a fact. Proceed with the ordinary
+  pipeline from the back-off check onward, unchanged.
+* **Unevaluable** — the tool call errors, `gh` is unauthenticated, the run
+  id isn't found, the referenced card can't be read → treat as **absent**
+  (fall through to Layer B) and say so in the report. **Never** treat
+  unevaluable as TRUE; an unreachable `gh` must not be able to unblock a
+  card.
+
+**Cap: 10 probe evaluations per pass.** A candidate with no probe costs
+nothing and doesn't count; once 10 candidates have had a present probe
+actually evaluated, stop evaluating and treat every further probe as absent
+for this pass — report that the cap was hit and how many cards it affected,
+never silently. With a 10-candidate list and a fixed-5 budget this cannot
+bind today; it is the backstop for if either grows.
+
+A TRUE probe grants **no extra budget**: the resume it triggers is that
+card's one touch for the pass and counts against the fixed 5 like every
+other action (see "Touch budget" below).
+
+### Premise-resolved action — shared by Layer A and Layer B
+
+Identical for both layers; only the evidence differs.
+
+This is **not** a completeness verdict and reopens nothing in Rule 1. The
+Manager is doing exactly what the routing matrix already licenses — picking
+the next actor — and the actor it picks is the one with the context: the
+agent that escalated. See the signals table's first row above. **The card
+stays in Need Human.** The resumed agent moves it, or re-escalates; the
+Manager does neither.
+
+**Resolve the resume target first.** A Need Human candidate has only run
+call ① (liveness) at this point, which proves nothing is in flight but names
+no session to resume. Run **call ②** now — `list_runs(notion_task_id=
+page_id, category="work", limit=10)`, with the same newest-non-`qa-*`
+selection rule the Run check describes above — to get the qualifying run.
+This is the one place Batch 2 reaches call ②.
+
+Then resume with the **Batch 1 machinery, verbatim** ("Acting on a
+qualifying card" above): `invoke_kanban_agent(page_id, run_id=<that
+qualifying run>, message=...)`, falling back to
+`run_agent_async(slug=<the qualifying run's `source_slug`>)`, with the same
+`no-session` / `resume-transport` / `qa-dedup-409` wall handling if it
+refuses. If call ② returns nothing (`no-work-run`), there is no original
+agent to hand this back to — record that wall as usual and fall through to
+the ordinary routing matrix instead; never invent a dispatch target.
+
+The resume message MUST carry the evidence, the ask, and the re-escalation
+instruction:
+
+```
+invoke_kanban_agent(page_id, run_id=<the qualifying run>, message="""
+Your card <page_id> is in Need Human, blocked on: <the stated blocker>.
+That premise now looks resolved: <the concrete evidence — e.g. "UnblockProbe
+pr-merged tekflox/aw-app-notion#14 evaluates TRUE: gh reports state MERGED">.
+Re-read the card and decide what happens next — you have the context, the
+Manager does not and is not deciding anything here. If the work is now
+unblocked, continue or conclude it as you see fit and move the card
+yourself. If you are STILL blocked — the evidence is wrong, or it was never
+the real blocker — re-escalate explicitly (ask_human and/or
+move_kanban_task(need_human) with a comment) AND re-write both SweepBlock
+and UnblockProbe, because the Manager cleared them when it resumed you:
+until you re-write them, nothing will remind a human about this card.
+""")
+```
+
+**The re-escalation sentence is not boilerplate.** Clearing the markers
+disarms the deterministic 12h human re-ping for this card (see "The 12h
+re-ping gate" above). On a false-positive probe, a resumed agent that does
+not re-escalate and re-write them leaves the card quiet with only the 48h
+fail-open as a net. Say it in the message, every time.
+
+Then, in the same turn as the dispatch:
+
+1. **Clear both markers inline** — `set_kanban_property(page_id,
+   "SweepBlock", "")` and `set_kanban_property(page_id, "UnblockProbe",
+   "")`. Inline, not deferred: what these markers encode is "only a human
+   can act here," and that is precisely the premise the evidence just
+   falsified. This is the one clearing path outside the Update rule's own
+   clean-touch/status-change branches.
+2. `add_kanban_comment(page_id, text="🧹 manager: ♻️ premise resolved — ...")`
+   naming the **concrete** evidence: which probe or which verification call,
+   and what it returned (`pr-merged tekflox/aw-app-notion#14 → MERGED`;
+   `run 4b039a30… → success`; "latest comment said waiting on #14, `gh pr
+   view` shows it merged 2026-11-13"). Never just "the blocker looks
+   resolved." Also name which agent/run is being resumed, and state that the
+   card stays in Need Human.
+3. `register_callback(run_id=<the dispatched run_id>)`, keeping
+   `(page_id, run_id, "Need Human")` in your notes — `LastSweptAt` is
+   **deferred** to that wake-up exactly like any other dispatch, never
+   stamped inline here. (The two property writes in step 1 are not a stamp;
+   they clear markers, they do not touch `LastSweptAt`.)
+4. Record the outcome as `unblock_resumed` in plan memory (see "Plan memory"
+   above).
+
+**No new wall key for a failed unblock-resume.** If the resumed agent comes
+back terminal-`error`, or terminal-`success` with no new comment, the
+existing `resume-ineffective:<session8>` wall at the deferred wake-up
+already captures it and routes it per the matrix — no new vocabulary for no
+new information.
 
 ---
 
@@ -1626,7 +2026,8 @@ Mirror rule on Kanban: the Manager may move a card **out of** `need_human`
 when the evidence it was waiting on now exists, naming that evidence in
 the comment. The `routed-human`/`escalated` SweepBlock markers clear per
 the ordinary Update-rule semantics above (a status change or a clean
-touch) — this section adds no new clearing path for them.
+touch), plus the premise-resolved resume's inline clear (see "UnblockProbe
+— premise probes" above) — *this* section adds no clearing path of its own.
 
 This section grants no new tool access: `maintenance-agents-config`
 already reaches `aw-kanban`, and the runner container already carries
@@ -1683,6 +2084,27 @@ feeder, if it told you) — then cover:
   card's Status before the correcting move. If the scan window
   (`list_runs(limit=300)`) came back saturated, say so — that's the signal
   it may be missing older escalations, not proof there are none.
+* **Premise revalidation**, per Need Human card it ran on (see "UnblockProbe
+  — premise probes"):
+  * Layer A — whether a probe was present, its `<kind>`/`<arg>`, and what it
+    evaluated to: TRUE (and the resume it triggered), FALSE (blocker
+    confirmed, Layer B skipped), malformed (→ absent), or **unevaluable**
+    (say which call failed and how — an unevaluable probe is reported, never
+    quietly dropped). If the **10-evaluation cap** was hit, say so and name
+    how many cards went unevaluated.
+  * Layer B — for a card with no usable probe: the stated reason read, which
+    verification calls were spent (up to 3) and what they returned, and the
+    verdict: resolved / still-true / **unverifiable**. Unverifiable fell
+    through to the ordinary behavior — say that plainly, with what was tried,
+    rather than letting it read as "checked and fine."
+  * For every **premise-resolved resume**: the evidence cited, which
+    run/agent was resumed, that `SweepBlock` **and** `UnblockProbe` were
+    cleared inline, and that the card was deliberately **left in Need
+    Human** for the resumed agent to move. Its verdict is its own — do not
+    wait for it or report it as the Manager's.
+* Cards where this pass **wrote** an `UnblockProbe` (destination 4 or the
+  third rule's writer duty) — the value written, or that the blocker had no
+  checkable shape so none was written.
 * Every **SweepBlock increment** this pass, whether or not that card was
   otherwise picked — `"wall qa-dedup-409 now 2/3 on card <page_id>"` — this
   includes `resume-ineffective` increments written at a wake-up, which are
