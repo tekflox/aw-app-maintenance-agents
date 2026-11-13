@@ -97,38 +97,65 @@ verbatim). A future selector gets its own named subsection there; a
 dispatch naming a selector with no matching subsection is reported and
 stopped, never approximated by the closest-sounding one.
 
-**Mode B — explicit work orders.** The input carries a list of cards a
-feeder has already identified as needing attention, one entry per card:
+**Mode B — explicit work orders.** The input carries a list of items a
+feeder has already identified as needing attention, one entry each. Two
+shapes exist, told apart by which identifying key is present — never by
+the feeder's name alone, since one feeder (`work_loop`, below) emits both:
 
-* `page_id` (required) — the Kanban card.
-* `reason` (free text) — why this card needs a touch.
-* `evidence` (free text) — run ids, PR urls, comment excerpts backing the
-  reason, so the routing decision below isn't made on the feeder's say-so
-  alone.
-* `suggested_action` (optional) — a hint, not a directive. The per-card
-  pipeline still makes its own routing-matrix judgment; a `suggested_action`
-  that conflicts with the signals you actually see on the card does not
-  bind you.
+* **Card-shaped** (a Kanban card):
+  * `page_id` (required) — the Kanban card.
+  * `reason` (free text) — why this card needs a touch.
+  * `evidence` (free text) — run ids, PR urls, comment excerpts backing the
+    reason, so the routing decision below isn't made on the feeder's say-so
+    alone.
+  * `suggested_action` (optional) — a hint, not a directive. The per-card
+    pipeline still makes its own routing-matrix judgment; a
+    `suggested_action` that conflicts with the signals you actually see on
+    the card does not bind you.
+* **PR-shaped** (an open pull request, no Kanban card at all):
+  * `pr` (required) — the PR identifier, e.g. `owner/repo#123`.
+  * `url` (required) — the PR's URL.
+  * `reason` / `evidence` / `suggested_action` — same free-text roles as
+    above, but about the PR (e.g. "open PR stalled 8h, no live or recent CI
+    on HEAD").
 
-A list item with a missing or malformed `page_id` is reported and skipped
-— never guess which card was meant. Mode B skips straight to the "Per-card
-pipeline" below for each item (a selector's own job — deciding WHICH cards
-qualify — is already done by the feeder in this mode).
+A list item with neither a `page_id` nor a `pr` is reported and skipped —
+never guess which card or PR was meant. A card-shaped item skips straight
+to the "Per-card pipeline" below (a selector's own job — deciding WHICH
+cards qualify — is already done by the feeder in this mode). A PR-shaped
+item has no Kanban page to run-check, route through the card routing
+matrix, or back off via `LastSweptAt` against — that pipeline is Kanban-
+card-specific and does not apply to it. Act on it directly per its
+`suggested_action` (e.g. comment, merge if green+approved, dispatch a
+coder, or close if obsolete) using PR-level operations (`gh pr ...`), not
+the Kanban-card actions (`move_kanban_task`, etc.) — a concrete routing
+matrix for PR-shaped items is not yet defined here; treat this as the
+documented gap until one is.
 
-**`work_loop` is the canonical Mode B feeder.** The `agents-platform-runners`
-tool `work_loop(loops=["attention"])` (architect design, Kanban
-4165bf3b-9510-810d; shipped PR #36) emits a `work_orders` list in exactly
-this shape — confirmed byte-compatible against the merged tool's actual
-output, no drift from the design during implementation. Its `evidence`
-string is where the tool's own pre-computed run-liveness check shows up —
-either `"newest work run <run_id> (source=<slug>) ended <N>min ago"` (a
-resumable run exists) or `"no dispatched run found for this card"` (none
-does) — see "Run check (non-negotiable exclusion)" below for what that
-changes about the two-call protocol. `suggested_action` arrives as either
-`"resume via invoke_kanban_agent run_id=<run_id>"` or `"needs routing — no
-prior run to resume"` — still a hint, not a directive; the per-card pipeline
-still makes its own routing-matrix judgment per the general Mode B rule
-above.
+**`work_loop` is the canonical Mode B feeder — for both shapes.** The
+`agents-platform-runners` tool `work_loop(loops=["attention"])` (architect
+design, Kanban 4165bf3b-9510-810d; shipped PR #36) emits a `work_orders`
+list in exactly the card shape above — confirmed byte-compatible against
+the merged tool's actual output, no drift from the design during
+implementation. Its `evidence` string is where the tool's own pre-computed
+run-liveness check shows up — either `"newest work run <run_id>
+(source=<slug>) ended <N>min ago"` (a resumable run exists) or `"no
+dispatched run found for this card"` (none does) — see "Run check
+(non-negotiable exclusion)" below for what that changes about the two-call
+protocol. `suggested_action` arrives as either `"resume via
+invoke_kanban_agent run_id=<run_id>"` or `"needs routing — no prior run to
+resume"` — still a hint, not a directive; the per-card pipeline still makes
+its own routing-matrix judgment per the general Mode B rule above.
+
+`work_loop(loops=["prs"])` (card 4175bf3b-9510-8163) is the same feeder's
+PR-shaped side — it emits the PR shape above, `evidence` reading e.g.
+`"updatedAt=...; head=...; ...; author=...; local checkout repos/..."`,
+`suggested_action` always `"push forward: merge if green+approved, comment,
+dispatch a coder, or close if obsolete"`. Dispatched together with the
+`attention` loop in one `work_loop(dispatch_manager=true)` call, a single
+Mode B input list can carry both shapes at once — the `page_id` vs `pr`
+key is what tells each entry apart, not its position in the list or which
+loop ran.
 
 **Shared touch budget, regardless of mode:** fixed at **5 cards per
 invocation** (see "Touch budget" below) — Mode A's selector and Mode B's
