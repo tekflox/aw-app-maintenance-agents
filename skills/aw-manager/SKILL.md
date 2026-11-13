@@ -618,11 +618,33 @@ Signal B is exempt, for the self-clearing reason stated in its own section.
 **Cap to the fixed-5 budget before acting on anything.** Both signals plus
 the back-off filter can surface more survivors than the budget has room for —
 plausible precisely in the outage scenario this check exists to backstop,
-where many cards fail to move at once. Sort survivors longest-stuck-first
-and take **at most 5**: every Signal-B survivor before every Signal-A one
-(B is by construction older than A's ~11h horizon, so it is the more
-neglected class), Signal B ordered among itself by `last_swept_at` ascending
-with unset first, Signal A by the qualifying row's own `ended_at` ascending.
+where many cards fail to move at once. Take **at most 5**, chosen in two
+steps:
+
+1. **Perishable first.** A Signal-A survivor whose qualifying run's
+   `ended_at` is within ~2h of falling off the run-scan window (i.e. older
+   than roughly 9h, against the ~11h horizon documented above) takes a slot
+   ahead of everything else. The asymmetry is the reason, not urgency:
+   when a Signal-A card scrolls out of the newest-300 window it becomes
+   **permanently** invisible to this check, while a deferred Signal-B card
+   is still sitting on the board next pass with its property unchanged. One
+   deferral costs a pass; the other costs the card. Oldest `ended_at` first
+   among these.
+2. **Then longest-stuck-first across BOTH signals, one merged ordering** —
+   no class precedence. Each survivor's "stuck since" instant is: Signal A →
+   the qualifying row's `ended_at`; Signal B → `last_swept_at` if set, else
+   the card's `last_edited_time` (the best available proxy for when the
+   verdict stopped being acted on). Sort ascending and fill the remaining
+   slots.
+
+Do **not** rank every Signal B ahead of every Signal A. Signal B has no
+minimum dwell time — it is exempt from the back-off and qualifies the
+instant `qa_status` flips while `Status` is still In Progress, possibly
+seconds ago — so a blanket B-before-A order would let a brand-new B card
+displace an A card that has been stuck for hours, every pass, until that A
+card falls off the window for good (caught in review on this PR; the first
+draft of this rule asserted B was "by construction older", which is false).
+
 If more than 5 survive, the rest
 are **not** touched this pass — report the overflow count explicitly (they
 remain eligible candidates on the very next pass, back-off permitting; this
