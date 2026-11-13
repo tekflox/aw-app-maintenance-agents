@@ -420,25 +420,62 @@ wake-up itself is handled.
 before anything else:
 
 * `LastSweptAt` unset → the candidate proceeds as today.
-* `LastSweptAt` set → the candidate qualifies **only if** at least one
-  comment on the card has a timestamp strictly after `LastSweptAt`.
-  Otherwise **skip**, reason: `"backed off: last swept <ts>, no comment
-  since"`.
+* `LastSweptAt` set and `now − LastSweptAt < 48h` → the candidate qualifies
+  **only if** at least one comment on the card has a timestamp strictly
+  after `LastSweptAt`. Otherwise **skip**, reason: `"backed off: last swept
+  <ts>, no comment since"`.
+* `LastSweptAt` set and `now − LastSweptAt ≥ 48h` → the candidate
+  **qualifies regardless**, with or without a newer comment. Say so in the
+  pass report: `"re-qualified: last swept <ts>, >48h with no activity"`.
 
 If nothing was done on the card since the last sweep, there is no reason to
 push it again — you would just get the same result. **Any** comment after
-`LastSweptAt` re-arms eligibility, no matter how old `LastSweptAt` is, and no
-matter who wrote it — human or agent, no authorship distinction.
+`LastSweptAt` re-arms eligibility, no matter who wrote it — human or agent,
+no authorship distinction.
+
+**Why the back-off has a ceiling at all (card 4175bf3b-9510-8191).** "No
+activity since my touch" reads as "nothing changed, don't bother" — but it
+is equally the signature of a card that is **hard-walled**: one where every
+route the Manager has is refused, so no comment can ever appear, so the card
+can never re-qualify, so the routing matrix never gets to run on it. An
+indefinite back-off therefore contradicts the matrix's own purpose. It
+happened live: iteration 31 (run `9c6dc41c`, 2026-11-13) backed off card
+`4085bf3b-9510-815a` (N6b) on exactly this rule — a card whose every resume
+attempt 409s on the QA-dedup guard, untouched since 2026-11-06 while
+`QAStatus=need_human` sat on it.
+
+The loop this re-opens is **bounded**, which is what makes 48h safe rather
+than a return to the 8-days-of-identical-comments behaviour the back-off was
+introduced to stop. A re-picked card with no progress feeds `SweepBlock`:
+an interpretable wall (`qa-dedup-409`, `resume-ineffective`) routes on the
+**first** hit, anything else escalates on the **third** — and both terminate
+in `need_human` + an `ask_human` ping, which is a real destination, not
+another comment. So the worst case is a handful of touches ending in a human
+being asked, not an unbounded comment thread.
+
+The comparison stays **property-based** (`LastSweptAt` vs now), never a
+count of how many times the Manager has commented — Frederico has
+explicitly rejected comment-count heuristics for this, twice.
+
+48h is the same window the Need-Human reping fail-open already uses for the
+identical judgement (`_REPING_UNROUTED_FAILOPEN_S`,
+`aw-app-notion/notion_app/kanban/cards.py`: "a markerless card untouched for
+this long pings anyway, flagged fail-open, so a starved card can never be
+suppressed forever"). Two different suppressions, one agreed answer for how
+long a starved card may stay invisible — reuse it rather than inventing a
+second number.
 
 **How to check:**
 
 * Stamp: `get_kanban_properties(page_id, properties=["LastSweptAt"])` → an
   ISO string, or `null` if never swept (the date flattens to its start
-  value, `client.py:389-390`). **Skip this fetch for a Batch 1/Batch 2
-  candidate** — it already carries the stamp as `last_swept_at` on the
-  candidate object returned by `list_kanban_cards_need_attention` (see
-  "Candidate list" below). Only the Priority check, which doesn't call that
-  tool, still needs the standalone fetch.
+  value, `client.py:389-390`). **Skip this fetch for any candidate that came
+  off `list_kanban_cards_need_attention`** — Batch 1, Batch 2, and the
+  Priority check's Signal B all carry the stamp as `last_swept_at` on the
+  candidate object already (see "Candidate list" below). Only the Priority
+  check's **Signal A**, whose survivors come from a `list_runs` scan rather
+  than that list, still needs the standalone fetch — and Signal B does not
+  consult the back-off at all.
 * Latest comment: `get_kanban_card(page_id, include_comments=true)` →
   `comments_md` lines read `"- **<created_time>** — text"`, oldest →
   newest; take the last line's timestamp.
@@ -457,6 +494,59 @@ threads see the `aw-autoskill-huge-kanban-card-comments` skill.
 
 ## Priority check — escalation that never moved the card
 
+**Two independent signals, same meaning: a human was already asked for and
+the card does not say so.** Signal A is the run-side one this section was
+built around (`flow_needs_human` on the card's latest run). Signal B is the
+card-side one — `qa_status == "need_human"` while the card's own `Status` is
+"In Progress". Run **both** every pass; a card qualifying on either is a
+Priority-check candidate, and a card qualifying on both is one candidate,
+not two.
+
+**Signal B exists because Signal A has a horizon.** A's scan is the newest
+300 runs platform-wide, and that window **saturated at ~11h** on the
+2026-11-13 pass (run `9c6dc41c`) — so A is structurally unable to see an
+escalation older than roughly half a day on current traffic. The card
+property has no horizon: card `4085bf3b-9510-815a` (N6b) has carried
+`QAStatus=need_human` with `Status=In Progress` since **2026-10-29**, and no
+pass could see it. Treat the card property as the durable signal and the run
+scan as the fast one.
+
+### Signal B — a recorded QA verdict nobody enacted
+
+Read it straight off the candidate list: every card
+`list_kanban_cards_need_attention` returns carries `qa_status` (added for
+this check — `aw-app-notion`, card 4175bf3b-9510-8191). **No extra fetch**,
+and nothing to scan.
+
+A candidate qualifies on Signal B when **both** hold:
+
+* `qa_status` is the board's `need_human` verdict, **and**
+* its `status` is the board's "In Progress" option.
+
+That combination is a QA agent having recorded "a human needs to look at
+this" and the Status column never having been moved to match — the same
+correctness failure Signal A catches, arriving by the other door. Any other
+`qa_status` value, or a `Status` already at "Need Human"/"Done"/"Archived",
+does **not** qualify: there is nothing to correct.
+
+**Signal B is exempt from the `LastSweptAt` back-off entirely** — including
+the second-and-later-pass back-off that Signal A honours below. The reason
+it is safe to exempt, and the reason this is not a licence to re-touch
+forever, is that the signal is **self-clearing**: the action it triggers
+moves the card's `Status` off "In Progress" (a `need_human` move, whether
+from this check directly or from the routing matrix's first-hit route), and
+the moment that lands the card no longer satisfies the second condition
+above. A Signal-B card can therefore be touched repeatedly only while the
+move itself keeps failing — which is precisely when it should be.
+
+Route it per the **Routing matrix** — do not assume the direct move below is
+always right for it. For the `qa-dedup-409` wall specifically (every
+`invoke_kanban_agent` resume refused by the QA-dedup guard, which is N6b's
+exact wall) the matrix already specifies **first-hit escalation**:
+`need_human` move + `ask_human` ping, not a third-hit wait.
+
+### Signal A — a flow escalation whose move failed
+
 A card whose most-recently-dispatched run set `flow_needs_human=true` (a
 durable column on the `Run` row — `core/executor.py::_escalate_need_human`
 sets it on every run sharing that run's `flow_run_id` once a flow exhausts
@@ -469,7 +559,9 @@ equivalent of it, ever breaks the same way again). Run this **before** Batch
 1 and Batch 2, every pass, **regardless of any card's `last_edited_time` or
 `LastSweptAt`** — a card stuck on a failed escalation could be minutes old
 and still needs this now, not whenever Batch 1's own run-activity gate
-would eventually catch it.
+would eventually catch it. (The `list_kanban_cards_need_attention` call
+itself happens first, before this check, because Signal B reads from it —
+see "Candidate list" below. This check still ACTS before either batch.)
 
 `list_runs` has no server-side filter for `flow_needs_human` — checked the
 MCP tool's actual param list (`category`, `limit`, `notion_task_id`,
@@ -506,25 +598,32 @@ saturated (300 rows returned and the oldest is recent) — that is the signal
 the window may be too narrow for current traffic, raise it rather than
 silently widening or narrowing `limit` on your own.
 
-**Back-off — applies here too, deliberately, once a card has been picked by
-this check at least once.** Frederico left this as a judgment call rather
-than a fixed rule: the *first* time a card qualifies, skip the staleness/
-`LastSweptAt` gate entirely, per above — but if the Manager already
-corrected this exact card's move on a prior pass and a human still hasn't
-acted on it, re-touching it every single day is pure noise with no new
+Signal B has no equivalent limitation and is the reason this one is now
+survivable rather than a hole: see "Signal B" above.
+
+**Back-off — applies to Signal A only, deliberately, once a card has been
+picked by this check at least once.** Frederico left this as a judgment call
+rather than a fixed rule: the *first* time a card qualifies, skip the
+staleness/`LastSweptAt` gate entirely, per above — but if the Manager
+already corrected this exact card's move on a prior pass and a human still
+hasn't acted on it, re-touching it every single day is pure noise with no new
 information (the flow's own decision hasn't changed, only the elapsed time
 has). So: run the ordinary **Back-off — LastSweptAt** check (see above) on a
-candidate here exactly as Batch 1/2 do, and skip on failure with the same
-`"backed off: last swept <ts>, no comment since"` reason. This does not
+Signal-A candidate exactly as Batch 1/2 do, and skip on failure with the
+same `"backed off: last swept <ts>, no comment since"` reason. This does not
 reopen the staleness gate this section exists to bypass — `last_edited_time`
 is never consulted here, only `LastSweptAt` + the comment-since check.
+Signal B is exempt, for the self-clearing reason stated in its own section.
 
-**Cap to the fixed-5 budget before acting on anything.** Steps 1-4 plus the
-back-off filter can surface more survivors than the budget has room for —
+**Cap to the fixed-5 budget before acting on anything.** Both signals plus
+the back-off filter can surface more survivors than the budget has room for —
 plausible precisely in the outage scenario this check exists to backstop,
-where many cards fail to move at once. Sort survivors **oldest-run-first**
-by the qualifying row's own `ended_at` (the longest-stuck escalation is the
-most urgent one) and take **at most 5**. If more than 5 survive, the rest
+where many cards fail to move at once. Sort survivors longest-stuck-first
+and take **at most 5**: every Signal-B survivor before every Signal-A one
+(B is by construction older than A's ~11h horizon, so it is the more
+neglected class), Signal B ordered among itself by `last_swept_at` ascending
+with unset first, Signal A by the qualifying row's own `ended_at` ascending.
+If more than 5 survive, the rest
 are **not** touched this pass — report the overflow count explicitly (they
 remain eligible candidates on the very next pass, back-off permitting; this
 is a deferral, not a drop). This is the same invariant "Batch size" states
@@ -535,15 +634,16 @@ below.
 
 **Acting on a qualifying card — a second narrow, explicitly-granted
 exception to Rule 1** (the first is "Not needed" archiving, below): the
-flow itself already made the completeness/correctness call here
-(`flow_needs_human=true` is that decision, already recorded) — the Manager
-is not deciding anything new, only finishing a move the flow tried and
-failed to make. Unlike Batch 1/2, there is no session worth resuming: the
-run that escalated already ended, and re-asking it "is this done?" makes no
-sense when it has already answered "a human needs to look at this." So move
-the card directly:
+completeness/correctness call was already made by somebody else and is
+already recorded — `flow_needs_human=true` for Signal A, the
+`QAStatus=need_human` verdict for Signal B — so the Manager is not deciding
+anything new, only finishing a move that never landed. Unlike Batch 1/2,
+there is no session worth resuming: the run that escalated already ended,
+and re-asking it "is this done?" makes no sense when it has already
+answered "a human needs to look at this." So move the card directly:
 
 ```
+# Signal A — the flow escalated and the move failed
 move_kanban_task(
   page_id,
   status="need_human",
@@ -551,7 +651,23 @@ move_kanban_task(
           f"(run {run.id}, agent {run.source_slug}) but the card never "
           f"moved — correcting it now. See the run for the original reason."
 )
+
+# Signal B — a QA verdict is on the card and the Status never followed it
+move_kanban_task(
+  page_id,
+  status="need_human",
+  comment=f"🧹 manager: QAStatus has read need_human since {qa_verdict_hint} "
+          f"while Status stayed In Progress — a recorded verdict nobody "
+          f"enacted. Moving the card to match it. Routed per the routing "
+          f"matrix: {named_action}."
+)
 ```
+
+For Signal B, `named_action` is not optional and not always this move on its
+own — a wall the routing matrix routes on first hit (`qa-dedup-409`,
+`resume-ineffective`) also needs its `ask_human` ping, per that section. A
+`need_human` move with no ping behind it is the passive outcome Rule 4
+abolished.
 
 `move_kanban_task` posts the comment before the status patch, same as every
 other move in this skill — one call, no separate `add_kanban_comment`.
@@ -746,8 +862,13 @@ in this skill (see "Batch size" below).
 
 ## Candidate list — one merged, ordered call feeds Batch 1 + Batch 2
 
-Both batches below walk the **same** call, made once per pass (after the
-Priority check, before either batch runs):
+Both batches below, **and the Priority check's Signal B**, walk the **same**
+call, made once per pass. It is the pass's **first** tool call: Signal B
+reads `qa_status` off these candidates, so the list has to exist before the
+Priority check runs. (It used to be made after that check, when the check
+had only the run-side Signal A and needed nothing from the board. Nothing
+else about the ordering moved — the Priority check still ACTS before either
+batch does.)
 
 ```
 list_kanban_cards_need_attention(limit=10)
@@ -762,12 +883,13 @@ newest-edited-first walk order Batch 1 used to argue for (see "Why
 last_edited_time..." above) — the unified priority ordering replaces it,
 owner-decided.
 
-Each returned card already carries `last_swept_at` and `last_edited_time` —
-both batches read those straight off the candidate instead of a separate
-property fetch (see "Back-off — LastSweptAt" above for the back-off
-shortcut this enables). The tool itself applies **no** staleness filter and
-**no** run-check — those stay agent-side, below, per the approved design on
-card 4115bf3b.
+Each returned card already carries `last_swept_at`, `last_edited_time`,
+`sweep_block` and `qa_status` — every consumer reads those straight off the
+candidate instead of a separate property fetch (see "Back-off —
+LastSweptAt" above for the back-off shortcut this enables, and "Priority
+check" for what `qa_status` is used for). The tool itself applies **no**
+staleness filter and **no** run-check — those stay agent-side, below, per
+the approved design on card 4115bf3b.
 
 If the call reports `truncated: true`, say so in the pass report — more
 candidates exist on the board than its 500-card scan cap saw. Not expected

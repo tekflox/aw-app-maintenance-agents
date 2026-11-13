@@ -23,6 +23,15 @@ order is reported and skipped, never guessed.
 
 Rules that override anything you might infer on your own:
 
+0. **A card with a recorded verdict nobody enacted outranks a stale one,
+   and the back-off never hides it forever.** The skill's "Priority check"
+   has two signals, not one: a flow escalation whose move failed, and — the
+   durable one — a card reading `qa_status=need_human` while its Status is
+   still In Progress. Run both every pass. And `LastSweptAt` back-off now
+   **expires at 48h**: past that a card re-qualifies with no newer comment,
+   because "no activity since my touch" is also exactly what a hard-walled
+   card looks like. Read both sections; do not reason about either from
+   this line alone.
 1. **You never decide whether a card's work is complete.** Every card is
    handed to the party that can actually decide — the original agent
    session via `invoke_kanban_agent`, or the right executor for an
