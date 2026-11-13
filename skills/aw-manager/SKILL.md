@@ -602,6 +602,26 @@ exactly one of four named actions, and the `🧹` comment states which:
 
 4. **"🙋 Sent to Need Human"** — genuinely only a human can act.
 
+   **Conservative allowlist — this destination is for these cases only:**
+
+   * an **irreversible or destructive** action on real data or real users
+     (delete a customer's data, drop a table, send a production migration);
+   * **spend/cost acceptance** — anything that commits money;
+   * **credentials, accounts or external access only Frederico holds**
+     (a vendor login, a 2FA prompt, a key no agent can mint);
+   * **communicating with an external party on his behalf**;
+   * an explicit **"waiting on Frederico"** in the card's own thread, or
+     **QA approved and awaiting his manual test/sign-off**;
+   * a **prior architect or product-owner escalation run on this card that
+     itself concluded a human is needed** — their contracts already route
+     business and irreversible calls back to a human, so a second lap
+     around destinations 2-3 would only produce architect↔PO ping-pong.
+
+   **Everything else must try destinations 1-3 first.** "No agent obviously
+   owns this" is not on the list — that is the Ambiguous row of the signals
+   table below, and it goes to architect. A card that merely *looks* stuck
+   is a routing problem, not a human decision.
+
    ```
    ask_human(question=<the concrete decision needed, with evidence: run ids, QA verdict, timestamps>)
    move_kanban_task(page_id, status="need_human",
@@ -615,7 +635,9 @@ exactly one of four named actions, and the `🧹` comment states which:
    — a `routed-human` marker clears only via a new comment or status
    change, same semantics as the third rule's `escalated` marker (see the
    Update rule below). `routed-human` is not a sixth wall; it's a
-   card-level sentinel written by this destination alone.
+   card-level sentinel written by this destination alone — and it is now
+   also what **arms** the deterministic 12h human re-ping, so writing it is
+   not optional bookkeeping (see "The 12h re-ping gate" below).
 
 Destinations 1-3 each produce a running work run on the card — the existing
 liveness probe makes the card untouchable next sweep until that run ends,
@@ -644,6 +666,7 @@ PO-vs-architect-only table.
 | Latest comments raise a design/approach question, or QA bounced on architecture | architect (2) |
 | Scope/priority/mootness question, conflicting asks | product-owner (3) |
 | QA approved + awaiting manual test/sign-off, needs credentials/external access, or an explicit "waiting on Frederico" in the thread | human (4) — fires on the **first** such touch, not at N=3 |
+| A prior architect or product-owner run on this card already concluded a human is needed | human (4) — do not send it back round destinations 2-3; that is architect↔PO ping-pong |
 | Ambiguous | keep today's default: resume the original session via `invoke_kanban_agent` (that **is** an action) — only if that resume is itself refused/blocked does this matrix decide |
 
 ### Interaction with SweepBlock / the third rule — layered, not replaced
@@ -1482,6 +1505,39 @@ Escalation picks still count toward the fixed-5 budget like everything else
 it only changes what happens to a card already picked this pass (or, for
 `resume-ineffective`, already picked on a *previous* pass and now being
 closed out at its wake-up).
+
+### The 12h re-ping gate — SweepBlock arms it
+
+`SweepBlock` has a second reader outside this skill. The deterministic 12h
+Need Human re-ping (`list_kanban_cards_need_attention(reping=True)` in
+`aw-app-notion`, the kanban-sweep gate node's own call — not something the
+Manager invokes) no longer pings Frederico for every Need Human card. It
+pings only cards whose `SweepBlock` reads `routed-human|…` or
+`<wall_key>|escalated|…` — that is, the two markers written by **routing
+matrix destination 4** and by **the third rule** above, the two places an
+agent concluded only a human can act. Everything else is left to the
+routing matrix, which tries coder/architect/PO first.
+
+Three consequences for how this skill is followed, none of them new work:
+
+* **Writing the marker is what arms the reminder.** Destination 4's
+  `routed-human|1|<iso>|<detail>` and the third rule's
+  `<wall_key>|escalated|<iso>|<detail>` are no longer just back-off
+  bookkeeping — skip one and the card's `ask_human` still fires once, but
+  it never recurs.
+* **Clearing it disarms the reminder.** The Update rule's clean-touch and
+  status-change branches clear `SweepBlock`; that is correct and
+  deliberate — whatever the human was being reminded about no longer
+  applies. A clear is not a way to "silence" a card that is still waiting.
+* **A card nobody has judged is quieter, not forgotten.** An unmarked Need
+  Human card goes up to 48h without a reminder while agents try to resolve
+  it. Past 48h with no edit at all it pings anyway, flagged
+  `(unrouted ≥48h — fail-open)`, and in the meantime every suppressed card
+  is named in the tool's own `reping.deferred_unrouted` report.
+
+A malformed `SweepBlock` reads as absent on that side too, the same rule
+"The property" states above — so the parse discipline there now also
+decides whether a human hears about the card.
 
 ---
 
