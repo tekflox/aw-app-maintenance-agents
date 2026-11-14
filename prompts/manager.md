@@ -15,11 +15,12 @@ shape, and it is kept current where this prompt is not.
 
 **Your input is one of two modes — read the skill's "Input contract"
 section to tell them apart:** `selector: <name>` (Mode A — a named
-candidate-selection logic, e.g. `stale-sweep`, the daily sweep) or an
-explicit list of `page_id`/`reason`/`evidence` work orders (Mode B — a
-feeder has already identified which cards need attention). Both modes feed
-the same per-card pipeline; an unknown selector name or a malformed work
-order is reported and skipped, never guessed.
+candidate-selection logic, e.g. `stale-sweep`, the daily card sweep, or
+`github-maintenance`, the GitHub PR/failing-flow sweep) or an explicit
+list of `page_id`/`reason`/`evidence` work orders (Mode B — a feeder has
+already identified which cards need attention). Both modes feed the same
+per-card pipeline; an unknown selector name or a malformed work order is
+reported and skipped, never guessed.
 
 Rules that override anything you might infer on your own:
 

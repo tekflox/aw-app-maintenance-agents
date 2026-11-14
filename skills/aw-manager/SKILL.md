@@ -91,11 +91,12 @@ selector: stale-sweep
 ```
 
 A selector is a self-contained candidate-selection logic with its own
-definition under "Selectors (Mode A)" below. Today there is exactly one
-(`stale-sweep` — the original kanban-sweeper candidate logic, preserved
-verbatim). A future selector gets its own named subsection there; a
-dispatch naming a selector with no matching subsection is reported and
-stopped, never approximated by the closest-sounding one.
+definition under "Selectors (Mode A)" below. Today there are two:
+`stale-sweep` (the original kanban-sweeper candidate logic, preserved
+verbatim) and `github-maintenance` (PRs + failing CI flows from the
+GitHub Maintenance gate). A future selector gets its own named subsection
+there; a dispatch naming a selector with no matching subsection is
+reported and stopped, never approximated by the closest-sounding one.
 
 **Mode B — explicit work orders.** The input carries a list of items a
 feeder has already identified as needing attention, one entry each. Two
@@ -209,6 +210,248 @@ this selector's own definition — spans every section below down through
 "Batch 2" (inclusive). The shared mechanics those sections call into
 (Routing matrix, SweepBlock, Deferred stamp, Touch budget, Not needed) are
 documented in their own sections further down, reused as-is by Mode B.
+
+### `github-maintenance`
+
+Candidate source: the **GitHub Maintenance gate** (`aw-app-git`, shipped
+v0.24.0), not `list_kanban_cards_need_attention` — this selector's input
+already carries PRs and failing CI flows, not Kanban cards. Dispatched by
+the `github-maintenance` dag Workflow's `manage` node (gate `check` node →
+`manager` agent node, 6h cadence) with:
+
+```
+selector: github-maintenance
+```
+
+plus the gate's own JSON response (`{has_work, prs, failing_flows,
+counts}`) embedded as advisory evidence in the dispatch template.
+
+**Re-read the gate live before acting — never trust the embedded snapshot
+blindly.** It is a template-time snapshot; by the time this run actually
+executes, a PR may have merged or a flow gone green. First call:
+
+```
+GET http://172.18.0.1:9123/api/apps/git/github/maintenance?limit=20
+```
+
+(the internal workspace-API host — not `127.0.0.1`, which is this agent's
+own container; same "Reachable hosts" convention the `aw-system-analyst`
+skill documents). Use its response as truth for this pass; fall back to
+the embedded snapshot only if the live call itself fails, and say so
+plainly in the report rather than treating a stale fallback as equivalent
+to a live read.
+
+`prs` entries carry `{repo, number, url, title, author, badge, updated_at,
+age_hours, attention_reason}`; `failing_flows` entries carry `{repo,
+workflow, default_branch, latest_run_url, conclusion,
+consecutive_failures}` — as actually shipped in `aw-app-git` v0.24.0
+(`git_app/github_maintenance.py:scan_repo_failing_workflows`). **Neither
+`first_seen_at` nor `finding_key` is on the entry** despite earlier design
+language assuming them; the gate's own `flow_key(flow)` helper (`repo` +
+`:` + `workflow`, no slugging) is the only existing identity precedent —
+reuse it below rather than inventing a second one.
+
+**Hard constraint shaping every action below: the Manager's `gh` is
+UNAUTHENTICATED.** `maintenance-agents-config` deliberately carries no
+`github` permission — that flag is an admin push PAT, and granting it to a
+router rather than to the gh-authenticated coders it delegates to would be
+far more authority than a router needs. The Manager **decides and
+delegates**; it never runs a GitHub mutation itself (no `gh pr merge`, `gh
+pr close`, `gh pr comment` — the `devteam:*` label writes documented
+elsewhere in this skill are the one standing exception, unrelated to this
+selector). A plain unauthenticated *read* (`gh pr view ... --json
+author,authorAssociation`) is fine for a judgment call on these public
+repos — see "Known author check" below — the constraint is on writes, not
+reads.
+
+**Touch budget**: shares the same fixed-5-per-invocation budget as
+`stale-sweep` (see "Touch budget" below) — PR items first, then
+failing-flow items, in the gate's own order. Overflow past 5 is reported,
+not processed; it stays eligible on the next 6h tick, same "defer, don't
+drop" rule Mode B uses for its own overflow.
+
+#### Per attention PR
+
+Walk `prs` in the order the gate returns them — it already filtered to
+attention-worthy; don't re-filter by `updated_at`/`age_hours` yourselves.
+For each:
+
+**(a) Hand to coder** — `badge == "tests-failed"`, or `attention_reason`
+names a merge conflict or review-requested-changes:
+
+```
+run_agent_async(
+  slug="coder-sonnet",
+  input=f"PR {pr['url']} ({pr['repo']}#{pr['number']}) needs attention: "
+        f"{pr['attention_reason']} (badge={pr['badge']}). Expected end "
+        f"state: tests green and the PR merged, or — if not salvageable "
+        f"— closed with an explanatory comment naming why. You hold real "
+        f"gh auth; the Manager does not.",
+  target_slug="github-maintenance-plan",
+)
+```
+
+**(b) Close with a comment** — `attention_reason` reads stale, superseded,
+or abandoned (no update past the gate's stall threshold, or superseded by
+a newer PR on the same change):
+
+```
+run_agent_async(
+  slug="coder-haiku",
+  input=f"PR {pr['url']} ({pr['repo']}#{pr['number']}) looks "
+        f"stale/superseded/abandoned: {pr['attention_reason']} (age "
+        f"{pr['age_hours']}h). Close it with a comment explaining why. "
+        f"Do not merge.",
+  target_slug="github-maintenance-plan",
+)
+```
+
+**(c) Ready-to-merge, idle** — `badge == "ready-to-merge"` and
+`attention_reason` flags it as sitting idle (usually: automerge was
+skipped because the repo isn't tekflox-owned — see
+`app-release-automerge-skipped-for-non-tekflox-owned-app-repos`):
+
+* Known author (see below) → dispatch a coder to merge:
+  ```
+  run_agent_async(
+    slug="coder-sonnet",
+    input=f"PR {pr['url']} is ready-to-merge and idle "
+          f"({pr['age_hours']}h) — CI green, approved, author "
+          f"{pr['author']} is a known team member/bot. Merge it (the "
+          f"repo's own merge convention) and confirm.",
+    target_slug="github-maintenance-plan",
+  )
+  ```
+* Author not known → `ask_human` instead of merging — an external
+  contributor's PR is never auto-merged by an agent:
+  ```
+  ask_human(question=f"PR {pr['url']} by {pr['author']} is "
+                     f"ready-to-merge and idle, but the author isn't a "
+                     f"recognized team member/bot — merge it, or does it "
+                     f"need a closer look first?")
+  ```
+
+**(d) Ambiguous** — anything the gate surfaced that doesn't cleanly fit
+(a)-(c) (a product question, a badge/`attention_reason` combination not
+covered above, genuine uncertainty) → `ask_human`, with the PR's `url`,
+`badge`, and `attention_reason` as evidence. Never default to (a) on
+uncertainty — that is exactly the failure mode (d) exists to catch.
+
+##### Known author check
+
+"Known team member/bot" = the PR author is the workspace operator's own
+GitHub identity, a recognized bot account (a `[bot]`-suffixed login — e.g.
+`dependabot[bot]`, `renovate[bot]`), or has a visible `OWNER`/`MEMBER`/
+`COLLABORATOR` relationship to the repo. The gate payload only carries the
+plain `author` login — when an exact match on the operator's handle or a
+`[bot]` suffix doesn't already settle it, read the association directly (a
+plain read, fine unauthenticated on these public repos):
+
+```
+gh pr view <pr.url> --json author,authorAssociation
+```
+
+`OWNER`/`MEMBER`/`COLLABORATOR` → known. `CONTRIBUTOR`/
+`FIRST_TIME_CONTRIBUTOR`/`NONE`, or the read itself failing → not known.
+Never guess past an ambiguous or failed read — that falls through to
+`ask_human` in (c), never to a merge.
+
+#### Per failing flow
+
+Walk `failing_flows` in the order the gate returns them. For each:
+
+```
+create_kanban_task(
+  finding_key=f"ci:{flow['repo']}:{flow['workflow']}",
+  title=f"CI failing: {flow['workflow']} on "
+        f"{flow['repo']}@{flow['default_branch']}",
+  description=f"{flow['conclusion']} — {flow['consecutive_failures']} "
+              f"consecutive failure(s), latest at {flow['latest_run_url']}",
+  plan=f"Latest run: {flow['latest_run_url']}. Diagnose and fix the "
+       f"workflow so the next run on {flow['default_branch']} is green.",
+  agent_slug="coder-sonnet",
+  source="manager",
+  plan_slug="github-maintenance",
+  target_slug="github-maintenance-plan",
+  priority="Medium",
+  tags=["github", "ci"],
+)
+```
+
+`finding_key` mirrors the gate's own `flow_key(flow)` identity (`repo` +
+`:` + `workflow`, raw — no slugging) prefixed `ci:`, the same prefix the
+gate's own instant-ping `external_id` already uses. `create_kanban_task`'s
+`finding_key` is free-form `rich_text`, so an un-slugged workflow name
+(spaces, slashes) is accepted as-is; it only has to be **stable** across
+ticks for the same repo+workflow, which reusing the gate's own helper
+guarantees for free — don't invent a second, divergent slugging scheme.
+This **is** the "does a card already exist" check the design calls for: a
+repeat detection bumps `occurrence_count` rather than duplicating the card.
+
+**Mandatory dedup-bug workaround — not optional.** When the response's
+`is_new` is `false`, immediately `get_kanban_card(page_id=<returned
+page_id>)`. `create_kanban_task`'s own dedup only reliably reopens a card
+from `Done` (see `tooling:kanban-dedup-only-reopens-done-not-self-closed`,
+still open) — if the card's `status` is a terminal lane **other than
+Done** (`Self-closed`, `Archived`, etc.), it was **not** reopened despite a
+fresh, real, currently-failing flow:
+
+```
+move_kanban_task(
+  page_id=<page_id>,
+  status="backlog",
+  comment=f"🧹 manager: re-detected failing flow {finding_key} "
+          f"(occurrence_count={occurrence_count}) — card was "
+          f"{old_status}; reopening because create_kanban_task's dedup "
+          f"only auto-reopens from Done, not from {old_status}.",
+)
+```
+
+If `status` is already `need_human`, this flow was already escalated by a
+prior pass's loop guard (below) — do nothing further this tick beyond the
+dedup bump that already happened, and report it as "already escalated";
+do not re-`ask_human` for it.
+
+**Loop guard.** After the dedup bump (and any reopen above): if
+`occurrence_count >= 3` **and** the card shows no real progress — its
+`status` is still sitting in `Backlog` (never picked up) and every comment
+on it is one of this mechanism's own automated callouts (the dedup's
+"🔁 Re-detected" callout, or this selector's own reopen comment) with
+nothing else — stop treating the recurrence as routine bookkeeping and
+escalate instead of leaving it to bump silently forever:
+
+```
+ask_human(question=f"Failing flow {finding_key} has recurred "
+                   f"{occurrence_count} times with no progress on card "
+                   f"{page_id} — needs a human decision, not another "
+                   f"automatic re-file.")
+move_kanban_task(page_id=page_id, status="need_human",
+                  comment=f"🧹 manager: loop guard — {finding_key} "
+                          f"recurred {occurrence_count}x with no "
+                          f"engineering progress; escalating.")
+```
+
+Moving it to `need_human` is what stops `ask_human` from repeating every
+6h tick thereafter — the next pass's dedup bump finds `status ==
+"need_human"` and takes the "already escalated" branch above instead.
+This is the same shape as the stale-sweep SweepBlock third rule elsewhere
+in this skill, without reusing `SweepBlock` itself: that property's wall
+vocabulary is closed and scoped to the stale-sweep candidate flow (five
+named wall keys, see "SweepBlock" below), and a sixth, unrelated key does
+not belong in it — `status` alone is sufficient evidence here.
+
+#### What this selector reports
+
+Same "plain-text report, then conclude per Flow membership" rule as
+everything else in this skill (see "What to report" below for the shared
+framing). Cover, specifically: which PRs were seen and which destination
+(a)-(d) each got and why; the evidence for every "known author" call,
+including a failed/ambiguous `gh pr view` read; which failing flows were
+filed/bumped, their `is_new`/`occurrence_count`, and whether the dedup-bug
+workaround fired; every loop-guard escalation, with the `occurrence_count`
+and finding_key that triggered it; and whether the live gate re-read
+succeeded or the pass fell back to the dispatch template's embedded
+snapshot.
 
 ---
 
@@ -2122,19 +2365,21 @@ new information.
 
 **Fixed at 5 total per invocation**, regardless of mode. For the
 `stale-sweep` selector that's Priority check + Batch 1 + Batch 2 combined;
-for Mode B it's the work-order list, walked in the order given. Not
-configurable, not a default — do not read it from anywhere else or let it
-drift with board size. The Priority check runs first and takes from this
-same budget; it does not add to it. Escalation picks (the SweepBlock third
-rule above) count toward this same budget like everything else — they do
-not add to it either. A Mode B list longer than what's left of the budget
-has its overflow reported, not processed, per "Input contract" above.
+for `github-maintenance` it's attention PRs + failing flows combined,
+walked in the gate's own order; for Mode B it's the work-order list,
+walked in the order given. Not configurable, not a default — do not read
+it from anywhere else or let it drift with board size. The Priority check
+runs first and takes from this same budget; it does not add to it.
+Escalation picks (the SweepBlock third rule above, or `github-maintenance`'s
+own loop guard) count toward this same budget like everything else — they
+do not add to it either. A list longer than what's left of the budget has
+its overflow reported, not processed, per "Input contract" above.
 
 ---
 
 ## Feeders
 
-Today there is exactly one *scheduled* feeder: the **"Kanban sweep —
+Today there is one *scheduled* feeder confirmed live: the **"Kanban sweep —
 stale In Progress / Need Human"** scheduled task (`aw-app.json`), firing
 daily at 04:00 with `selector: stale-sweep` (Mode A). It is the Manager's
 primary trigger, and the one the "Back-off — LastSweptAt" and "Plan
@@ -2144,6 +2389,16 @@ today — see "`work_loop` is the canonical Mode B feeder" under "Input
 contract" above for its concrete evidence/suggested_action formats; it
 becomes this section's scheduled feeder too once the Kanban Sweep Plan's
 cadence switches to it (a separate, later card).
+
+A second scheduled feeder is being wired in parallel: the `github-maintenance`
+dag Workflow (gate `check` node → `manager` agent node) fired by a new
+`github-maintenance` operation Plan on a 6h cadence, dispatching
+`selector: github-maintenance` (Mode A) — see the selector's own
+definition above. Treat it as live only once that wiring card has actually
+merged and deployed; until then this selector still works correctly on a
+manual/ad-hoc `run_agent_async(slug="manager", input="selector:
+github-maintenance")` dispatch, same as any Mode A selector can be run
+outside its scheduled feeder.
 
 It will not be the only one. Any task, workflow or agent that has already
 identified cards needing attention can become a feeder, with no change to
