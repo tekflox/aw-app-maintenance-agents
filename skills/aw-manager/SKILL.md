@@ -228,18 +228,29 @@ counts}`) embedded as advisory evidence in the dispatch template.
 
 **Re-read the gate live before acting — never trust the embedded snapshot
 blindly.** It is a template-time snapshot; by the time this run actually
-executes, a PR may have merged or a flow gone green. First call:
+executes, a PR may have merged or a flow gone green. **Do not use
+`172.18.0.1:9123`/`:9030`** — that bridge-gateway address is not reachable
+from an agent-runner container at all (confirmed dead on both ports; see
+`arch:stale-doc-system-analyst-skill-workspace-api-port-9123-never-existed`
+and the `aw-system-analyst` skill's own "Reachable hosts" bullet, which
+carries the same unfixed mistake). An agent-runner container shares the
+workspace *filesystem* with the core server, not its loopback, so read the
+core's own published external URL and API key straight off disk —
+the same mechanism `src/cli/local_client.py` and
+`aw-app-call-agent/inherited_credential.py` already use for a sibling
+process/container with no loopback route:
 
 ```
-GET http://172.18.0.1:9123/api/apps/git/github/maintenance?limit=20
+source /opt/aw-workspace/.aw-workspace/.env   # AW_WORKSPACE_API_URL, AW_WORKSPACE_API_KEY
+curl -sS -m 15 -H "X-Api-Key: $AW_WORKSPACE_API_KEY" \
+  "$AW_WORKSPACE_API_URL/api/apps/git/github/maintenance?limit=20"
 ```
 
-(the internal workspace-API host — not `127.0.0.1`, which is this agent's
-own container; same "Reachable hosts" convention the `aw-system-analyst`
-skill documents). Use its response as truth for this pass; fall back to
-the embedded snapshot only if the live call itself fails, and say so
-plainly in the report rather than treating a stale fallback as equivalent
-to a live read.
+Use its response as truth for this pass. The external tunnel edge is
+measurably flaky (~30% connect-timeout rate observed in production) — fall
+back to the dispatch template's embedded snapshot only if this call itself
+times out or errors, and say so plainly in the report rather than treating
+a stale fallback as equivalent to a live read.
 
 `prs` entries carry `{repo, number, url, title, author, badge, updated_at,
 age_hours, attention_reason}`; `failing_flows` entries carry `{repo,
@@ -274,51 +285,71 @@ drop" rule Mode B uses for its own overflow.
 
 Walk `prs` in the order the gate returns them — it already filtered to
 attention-worthy; don't re-filter by `updated_at`/`age_hours` yourselves.
-For each:
 
-**(a) Hand to coder** — `badge == "tests-failed"`, or `attention_reason`
-names a merge conflict or review-requested-changes:
+**What `badge`/`attention_reason` actually carry — read this before the
+matrix below.** `attention_reason` is built by joining exactly two possible
+fragments, nothing else (`aw-app-git/git_app/github_maintenance.py:
+scan_pr_attention`, `_probe`): `"badge:<badge>"` when `badge` is one of
+`{tests-failed, ready-to-merge, needs-review}` (`ATTENTION_BADGES`), and/or
+`"stalled <N>h (><M>h)"` when the PR's age clears the stall threshold.
+`badge` itself comes from `classify_pr()` (`github_prs.py:78`), whose full
+vocabulary is `{draft, ci-running, tests-failed, ready-to-merge,
+needs-review, open}` — drafts never reach this list at all (filtered
+earlier). **There is no field anywhere in this payload that says "merge
+conflict", "changes requested", "superseded", or "abandoned"** — a
+CHANGES_REQUESTED review and a plain not-yet-reviewed PR both collapse
+into the same `needs-review` badge, and a conflicting-but-approved PR
+collapses into `open`. Route on `badge` + the presence of a "stalled"
+substring only; do not read intent into `attention_reason` text that was
+never written. For each PR:
+
+**(a) Hand to coder** — `badge == "tests-failed"`:
 
 ```
 run_agent_async(
   slug="coder-sonnet",
-  input=f"PR {pr['url']} ({pr['repo']}#{pr['number']}) needs attention: "
-        f"{pr['attention_reason']} (badge={pr['badge']}). Expected end "
-        f"state: tests green and the PR merged, or — if not salvageable "
-        f"— closed with an explanatory comment naming why. You hold real "
-        f"gh auth; the Manager does not.",
+  input=f"PR {pr['url']} ({pr['repo']}#{pr['number']}) has failing CI "
+        f"({pr['attention_reason']}). Expected end state: tests green "
+        f"and the PR merged, or — if not salvageable — closed with an "
+        f"explanatory comment naming why. You hold real gh auth; the "
+        f"Manager does not.",
   target_slug="github-maintenance-plan",
 )
 ```
 
-**(b) Close with a comment** — `attention_reason` reads stale, superseded,
-or abandoned (no update past the gate's stall threshold, or superseded by
-a newer PR on the same change):
+**(b) Hand to coder for stale/abandoned triage** — `badge == "open"` (no
+CI-failure or review signal put it on the list; it only surfaces at all
+because it's stalled — this is the closest real proxy for "nobody's
+touching this"):
 
 ```
 run_agent_async(
   slug="coder-haiku",
-  input=f"PR {pr['url']} ({pr['repo']}#{pr['number']}) looks "
-        f"stale/superseded/abandoned: {pr['attention_reason']} (age "
-        f"{pr['age_hours']}h). Close it with a comment explaining why. "
-        f"Do not merge.",
+  input=f"PR {pr['url']} ({pr['repo']}#{pr['number']}) has no CI/review "
+        f"signal and has been stalled {pr['age_hours']}h "
+        f"({pr['attention_reason']}). Look at it and decide: still worth "
+        f"pushing forward (nudge/rebase), or stale/superseded/abandoned "
+        f"— if the latter, close it with a comment explaining why. Do "
+        f"not merge.",
   target_slug="github-maintenance-plan",
 )
 ```
 
-**(c) Ready-to-merge, idle** — `badge == "ready-to-merge"` and
-`attention_reason` flags it as sitting idle (usually: automerge was
-skipped because the repo isn't tekflox-owned — see
+**(c) Ready-to-merge** — `badge == "ready-to-merge"` (CI green, approved,
+`mergeable == MERGEABLE` — this badge alone is the attention signal, no
+separate "idle" check; automerge usually already handles a fresh one, so
+by the time this selector sees it the common case is one automerge skipped
+because the repo isn't tekflox-owned — see
 `app-release-automerge-skipped-for-non-tekflox-owned-app-repos`):
 
 * Known author (see below) → dispatch a coder to merge:
   ```
   run_agent_async(
     slug="coder-sonnet",
-    input=f"PR {pr['url']} is ready-to-merge and idle "
-          f"({pr['age_hours']}h) — CI green, approved, author "
-          f"{pr['author']} is a known team member/bot. Merge it (the "
-          f"repo's own merge convention) and confirm.",
+    input=f"PR {pr['url']} is ready-to-merge ({pr['attention_reason']}) "
+          f"— CI green, approved, author {pr['author']} is a known team "
+          f"member/bot. Merge it (the repo's own merge convention) and "
+          f"confirm.",
     target_slug="github-maintenance-plan",
   )
   ```
@@ -326,14 +357,16 @@ skipped because the repo isn't tekflox-owned — see
   contributor's PR is never auto-merged by an agent:
   ```
   ask_human(question=f"PR {pr['url']} by {pr['author']} is "
-                     f"ready-to-merge and idle, but the author isn't a "
-                     f"recognized team member/bot — merge it, or does it "
-                     f"need a closer look first?")
+                     f"ready-to-merge, but the author isn't a recognized "
+                     f"team member/bot — merge it, or does it need a "
+                     f"closer look first?")
   ```
 
-**(d) Ambiguous** — anything the gate surfaced that doesn't cleanly fit
-(a)-(c) (a product question, a badge/`attention_reason` combination not
-covered above, genuine uncertainty) → `ask_human`, with the PR's `url`,
+**(d) Ambiguous** — `badge == "needs-review"` (the data cannot tell a
+plain not-yet-reviewed PR from one carrying CHANGES_REQUESTED or an
+unmergeable conflict — see the callout above; never guess which), or
+anything else the gate surfaces that doesn't cleanly fit (a)-(c) (a
+product question, genuine uncertainty) → `ask_human`, with the PR's `url`,
 `badge`, and `attention_reason` as evidence. Never default to (a) on
 uncertainty — that is exactly the failure mode (d) exists to catch.
 
